@@ -29,6 +29,7 @@ mechanisms are established here.
 - `turbo run export:web` + `npx serve dist` serves the SPA build;
 - `turbo run test` runs the RNTL test.
 - **Settles NativeWind v4 ↔ SDK 56 compat; safe-harbor fallback = SDK 54 (NOT 55).**
+  ✅ RESOLVED 2026-07-05: the pairing WORKS — see Gotchas & Open questions for the evidence; the fallback was never needed.
 
 ---
 
@@ -49,13 +50,14 @@ recreated here (only consumed/extended):
 - `lefthook.yml` (pre-commit staged lint/format; pre-push `--affected`), installed via
   `pnpm prepare`.
 - **`packages/config`** = `@platform/config`: ESLint flat config, `prettier.json`,
-  **`tailwind-preset.js`** (the semantic-token → CSS-var preset), and
+  **`tailwind-preset.cjs`** (the semantic-token → CSS-var preset), and
   `tsconfig/{base,expo,node}.json`.
-- `.github/workflows/` skeletons exist (ci.yml, e2e-nightly.yml, …) — Phase 2 only adds
-  the VR baseline data they consume; nightly wiring is finalized in Phase 8.
 
-> Confirm before starting: `mise install && pnpm install && pnpm turbo run lint` is a clean
-> no-op (Phase 1 verify). If `packages/config/tailwind-preset.js` does not yet map semantic
+> (No `.github/workflows/` prerequisite: Phase 1 does not create workflow skeletons — those
+> land in Phase 8. Phase 2 only produces the VR-baseline data they will later consume.)
+
+> Confirm before starting: `mise install && pnpm install && pnpm turbo run lint` is clean
+> (Phase 1 verify). If `packages/config/tailwind-preset.cjs` does not yet map semantic
 > color names to `hsl(var(--…))`, finish that in this phase's step (b) before wiring
 > `packages/ui`.
 
@@ -110,6 +112,7 @@ Concrete, testable:
 ```
 packages/ui/package.json
 packages/ui/tsconfig.json
+packages/ui/src/nativewind-env.d.ts   # className prop types — REQUIRED (see note below)
 packages/ui/src/index.ts
 packages/ui/src/lib/utils.ts
 packages/ui/src/lib/theme.ts          # (filled in step (b); created here)
@@ -134,7 +137,8 @@ packages/ui/CLAUDE.md                 # design-system runbook
   "types": "./src/index.ts",
   "exports": {
     ".": "./src/index.ts",
-    "./global.css": "./src/global.css"
+    "./global.css": "./src/global.css",
+    "./package.json": "./package.json"
   },
   "scripts": {
     "lint": "eslint .",
@@ -146,9 +150,9 @@ packages/ui/CLAUDE.md                 # design-system runbook
   "dependencies": {
     "class-variance-authority": "0.7.1",
     "clsx": "2.1.1",
-    "tailwind-merge": "2.6.0",
-    "@rn-primitives/slot": "1.4.0",
-    "@rn-primitives/types": "1.4.0"
+    "tailwind-merge": "2.6.1",
+    "@rn-primitives/slot": "1.5.2",
+    "@rn-primitives/types": "1.5.2"
   },
   "peerDependencies": {
     "nativewind": "*",
@@ -156,28 +160,57 @@ packages/ui/CLAUDE.md                 # design-system runbook
     "react-native": "*"
   },
   "devDependencies": {
-    "@platform/config": "workspace:*"
+    "@platform/config": "workspace:*",
+    "expo": "56.0.14",
+    "react": "19.2.3",
+    "react-native": "0.85.3",
+    "nativewind": "4.2.6",
+    "react-native-css-interop": "0.2.6",
+    "@types/react": "~19.2.0"
   }
 }
 ```
 
-> The `@rn-primitives/*` pins above are **1.4.x** (current `latest`, June 2026 — slot, types,
-> portal all at 1.4.0); these packages are **past 1.0**, so the pin-exact rationale is
+> The `@rn-primitives/*` pins above are **1.5.x** (1.5.2 current at the 2026-07-05 adoption);
+> these packages are **past 1.0**, so the pin-exact rationale is
 > **version-coupling to react-native-reusables** (rn-reusables components couple to specific
 > primitive releases and minor bumps can shift behavior), NOT pre-1.0 instability. Pin to
-> whatever the react-native-reusables CLI emits at adoption time, then freeze (exact, no
+> whatever is current at adoption time, then freeze (exact, no
 > caret). `class-variance-authority 0.7.1` and `clsx 2.1.1` are current; `tailwind-merge`
 > stays on the **2.6.x** line — do NOT bump to 3.x, which assumes Tailwind v4 (this stack is
 > Tailwind v3 / NativeWind v4).
+>
+> **Three load-bearing details in the skeleton above:**
+> - **`"./package.json": "./package.json"` exports passthrough is REQUIRED** — each product's
+>   `tailwind.config.js` resolves cross-package content globs via
+>   `require.resolve("@platform/ui/package.json")`; without the passthrough, `expo export`
+>   fails with `ERR_PACKAGE_PATH_NOT_EXPORTED`.
+> - **Explicit SDK-pinned devDeps are REQUIRED for standalone typecheck** — pnpm 11 (hoisted)
+>   does NOT materialize `"*"` peers, so without them `pnpm --filter @platform/ui exec tsc`
+>   fails (`Cannot find type definition file for 'expo'`, missing react/react-native). Use the
+>   SAME versions the app anchors (what `expo install` resolves there) so pnpm dedupes;
+>   `jest-expo` needs `expo` resolvable from this package anyway. Same applies to
+>   `packages/core` (step g).
+> - **`src/nativewind-env.d.ts`** must contain `/// <reference types="nativewind/types" />` —
+>   the `className` prop augmentation does NOT travel across TS program boundaries, so BOTH
+>   `packages/ui` and the app (step h) need their own env file, or every RN component errors
+>   `Property 'className' does not exist`.
 
 `packages/ui/tsconfig.json`:
 
 ```json
 {
-  "extends": "@platform/config/tsconfig/expo.json",
+  "extends": "@platform/config/tsconfig/expo",
   "include": ["src", ".storybook"]
 }
 ```
+
+> **Extends strings must be EXTENSIONLESS** (`@platform/config/tsconfig/expo`, not
+> `…/expo.json`): TS resolves non-relative `extends` through the package's `exports` map, and
+> Phase 1 exports the extensionless subpath `./tsconfig/expo`. The `.json`-suffixed form fails
+> with `File '@platform/config/tsconfig/expo.json' not found` (plus a misleading wall of lib
+> errors from a default-config fallback run). Applies to every tsconfig in this phase
+> (ui/core/app).
 
 `packages/ui/src/lib/utils.ts` — the `cn()` helper:
 
@@ -191,13 +224,14 @@ export function cn(...inputs: ClassValue[]) {
 ```
 
 `packages/ui/src/components/ui/text.tsx` — base primitive (cva + `className` escape hatch,
-semantic tokens only):
+semantic tokens only). **Package-internal imports are RELATIVE, never `@/`** — see the note
+after the CLI command below:
 
 ```tsx
 import * as React from "react";
 import { Text as RNText } from "react-native";
 import { cva, type VariantProps } from "class-variance-authority";
-import { cn } from "@/lib/utils";
+import { cn } from "../../lib/utils";
 
 const textVariants = cva("text-base text-foreground", {
   variants: {
@@ -234,8 +268,8 @@ export { textVariants };
 import * as React from "react";
 import { Pressable } from "react-native";
 import { cva, type VariantProps } from "class-variance-authority";
-import { cn } from "@/lib/utils";
-import { Text } from "@/components/ui/text";
+import { cn } from "../../lib/utils";
+import { Text } from "./text";
 
 const buttonVariants = cva(
   "flex-row items-center justify-center rounded-md",
@@ -304,7 +338,7 @@ export { buttonVariants, buttonTextVariants };
 ```tsx
 import * as React from "react";
 import { TextInput } from "react-native";
-import { cn } from "@/lib/utils";
+import { cn } from "../../lib/utils";
 
 export type InputProps = React.ComponentProps<typeof TextInput>;
 
@@ -329,8 +363,8 @@ Input.displayName = "Input";
 ```tsx
 import * as React from "react";
 import { View } from "react-native";
-import { cn } from "@/lib/utils";
-import { Text } from "@/components/ui/text";
+import { cn } from "../../lib/utils";
+import { Text } from "./text";
 
 export function Card({ className, ...props }: React.ComponentProps<typeof View>) {
   return (
@@ -383,10 +417,15 @@ pnpm --filter @platform/ui exec tsc --noEmit
 > hand into owned components, engine selection mainly affects the CLI's generated config
 > (which the app overrides anyway). If `cli add` errors under pnpm (it shells out to
 > `shadcn@latest` — known issue), author the component by hand into the shadcn shape above.
+> The CLI's `add` also **prompts interactively for `components.json`** — unusable from a
+> non-TTY (agent/CI) shell; the hand-author fallback is the reliable path there.
 
-> The `@/` import alias (`@/lib/utils`, `@/components/ui/text`) is the react-native-reusables
-> convention; map it in `packages/ui/tsconfig.json` `compilerOptions.paths` (`"@/*": ["src/*"]`)
-> and mirror it in the Storybook Vite + Jest configs (steps c, i).
+> **Convert the CLI's `@/` imports to RELATIVE imports while reconciling.** rn-reusables'
+> `@/` convention assumes components are copied INTO an app (where `@/` maps to the app
+> root); `@platform/ui` is consumed **as source from another package**, so a package-local
+> `@/` alias exists only in `packages/ui`'s own tsconfig — every downstream consumer's `tsc`
+> AND Metro fail on `@/lib/utils` at bundle time. Package-internal imports must be relative;
+> no tsconfig `paths`, no Storybook/Jest alias mirroring needed (or wanted).
 
 **Why** — PHILOSOPHY.md Design system bullet + Component-lifecycle bullet: primitives are
 **Tier-1 OWNED** source (shadcn model), consume **semantic tokens ONLY**, expose cva
@@ -400,7 +439,7 @@ ships to all four targets.
 **Files**
 
 ```
-packages/config/tailwind-preset.js   # (exists from Phase 1 — verify/extend)
+packages/config/tailwind-preset.cjs  # (exists from Phase 1 — verify/extend; .cjs by design)
 packages/ui/src/global.css           # default :root + .dark CSS-var blocks (web)
 packages/ui/src/lib/theme.ts         # default light/dark vars() objects (native)
 packages/ui/src/theme-provider.tsx   # provides NativeWind vars() + dark class plumbing
@@ -408,7 +447,8 @@ packages/ui/src/theme-provider.tsx   # provides NativeWind vars() + dark class p
 
 **Contents**
 
-`packages/config/tailwind-preset.js` (Key ruling **#8** — semantic names → CSS vars):
+`packages/config/tailwind-preset.cjs` (Key ruling **#8** — semantic names → CSS vars; the
+subpath consumers use stays `@platform/config/tailwind-preset`, extensionless):
 
 ```js
 /** @type {import('tailwindcss').Config} */
@@ -538,7 +578,7 @@ class on web — `colorScheme` from NativeWind):
 import * as React from "react";
 import { View } from "react-native";
 import { colorScheme } from "nativewind";
-import { themes, type Theme } from "@/lib/theme";
+import { themes, type Theme } from "./lib/theme";
 
 export function ThemeProvider({
   theme,
@@ -579,6 +619,8 @@ products rebrand by overriding VALUES, never component code.
 ```
 packages/ui/.storybook/main.ts
 packages/ui/.storybook/preview.tsx
+packages/ui/tailwind.config.js        # WORKBENCH-ONLY (see note below — never consumed by app builds)
+packages/ui/postcss.config.js         # WORKBENCH-ONLY (drives the Tailwind v3 pipeline for Storybook)
 packages/ui/src/components/ui/button.stories.tsx
 packages/ui/src/components/ui/text.stories.tsx
 packages/ui/src/components/ui/input.stories.tsx
@@ -593,6 +635,34 @@ broadest RN-web-vite + NativeWind compat). Add Storybook devDeps to
 `global.css` step — for **Tailwind v3 / NativeWind v4** that is `postcss` + `tailwindcss@^3.4`
 + `autoprefixer` (NOT `@tailwindcss/vite`, which is the Tailwind v4 path).
 
+Add `esbuild: true` to the `allowBuilds` map in `pnpm-workspace.yaml` BEFORE this install
+(the Phase-1 lefthook pattern repeats: the Storybook/Vite toolchain's esbuild postinstall is
+otherwise blocked with `ERR_PNPM_IGNORED_BUILDS`).
+
+**The workbench needs its own Tailwind config.** The "packages/ui has NO tailwind config"
+rule is an *app-consumption* rule (each product's `tailwind.config.js` owns app content
+globs); the Storybook PostCSS pipeline mandated here emits ZERO utilities without content
+globs of its own. Ship both files, clearly commented as never consumed by app builds:
+
+`packages/ui/tailwind.config.js`:
+
+```js
+// WORKBENCH-ONLY Tailwind config — consumed exclusively by the Storybook Vite/PostCSS
+// pipeline. App builds NEVER read this file (each product's tailwind.config.js owns the
+// app-side content globs; "packages/ui has no tailwind config" is an app-consumption rule).
+module.exports = {
+  presets: [require("nativewind/preset"), require("@platform/config/tailwind-preset")],
+  content: ["./src/**/*.{ts,tsx}", "./.storybook/**/*.{ts,tsx}"],
+};
+```
+
+`packages/ui/postcss.config.js`:
+
+```js
+// WORKBENCH-ONLY — Tailwind v3 PostCSS pipeline for the Storybook build.
+module.exports = { plugins: { tailwindcss: {}, autoprefixer: {} } };
+```
+
 > Do NOT separately install `@storybook/react-vite`, `@storybook/react`, or
 > `@vitejs/plugin-react` — `@storybook/react-native-web-vite` depends on all three (plus
 > `vite-plugin-rnw` and `vite-tsconfig-paths`) and pins its own sibling versions. Listing
@@ -603,12 +673,50 @@ broadest RN-web-vite + NativeWind compat). Add Storybook devDeps to
 `packages/ui/.storybook/main.ts` — NativeWind is wired through the **framework options**
 (`pluginReactOptions.jsxImportSource: "nativewind"`), NOT a CSS import alone; the bundled
 `vite-plugin-rnw` already aliases `react-native` → `react-native-web`, so **no manual
-`react-native` alias** is needed (only the `@` → `src` alias for the component-import
-convention):
+`react-native` alias** is needed (and no `@` alias either — package imports are relative):
 
 ```ts
 import type { StorybookConfig } from "@storybook/react-native-web-vite";
-import path from "node:path";
+import type { Plugin } from "vite";
+
+// nativewind eagerly re-exports verifyInstallation from its pure-CJS doctor chain
+// (nativewind/dist/doctor.js -> react-native-css-interop/dist/doctor*.js). Vite's DEV-mode
+// dep optimizer converts CJS on the fly, but the PRODUCTION rollup pass leaves those files
+// unconverted — so `storybook build` exits 0 yet every story in the STATIC build dies at
+// runtime with `ReferenceError: exports is not defined`.
+// (`build.commonjsOptions.transformMixedEsModules` does NOT fix it.) This plugin ESM-wraps
+// exactly those files: exports object + hoisted require→import shim + aliased export
+// bindings. Deliberately scoped to the doctor files only — re-verify the regex against the
+// installed nativewind/react-native-css-interop versions on upgrade.
+function fixCssInteropDoctorCjs(): Plugin {
+  const DOCTOR_CJS =
+    /(?:nativewind|react-native-css-interop)[\\/]dist[\\/]doctor[^\\/]*\.js$/;
+  return {
+    name: "fix-css-interop-doctor-cjs",
+    enforce: "pre",
+    transform(code, id) {
+      if (!DOCTOR_CJS.test(id)) return null;
+      const imports: string[] = [];
+      let i = 0;
+      const body = code.replace(
+        /(?:const|var|let)\s+(\w+)\s*=\s*require\((["'][^"']+["'])\)/g,
+        (_m, name, spec) => {
+          const alias = `__cjs_import_${i++}`;
+          imports.push(`import * as ${alias} from ${spec};`);
+          return `const ${name} = ${alias};`;
+        },
+      );
+      const named = [...new Set([...code.matchAll(/exports\.(\w+)\s*=/g)].map((m) => m[1]))];
+      const exportLines = named.map((n) => `export const ${n} = __cjs_exports.${n};`);
+      return [
+        ...imports,
+        "const __cjs_exports = {};",
+        body.replace(/\bexports\./g, "__cjs_exports."),
+        ...exportLines,
+      ].join("\n");
+    },
+  };
+}
 
 const config: StorybookConfig = {
   framework: {
@@ -624,15 +732,11 @@ const config: StorybookConfig = {
   addons: [],
   viteFinal: async (cfg) => {
     // react-native -> react-native-web is handled by the framework's bundled
-    // vite-plugin-rnw — do NOT add a manual alias. Only the @ -> src alias is needed.
-    cfg.resolve = cfg.resolve ?? {};
-    cfg.resolve.alias = {
-      ...(cfg.resolve.alias ?? {}),
-      "@": path.resolve(__dirname, "../src"),
-    };
-    // Run the Tailwind v3 pipeline on global.css (PostCSS + tailwindcss@^3.4 + autoprefixer).
-    // global.css is imported in preview.tsx; ensure a postcss.config.js with the
-    // tailwindcss + autoprefixer plugins exists so NativeWind utilities resolve.
+    // vite-plugin-rnw — do NOT add a manual alias (and no `@` alias: package-internal
+    // imports are relative). The Tailwind v3 pipeline runs via the workbench-only
+    // tailwind.config.js + postcss.config.js in this package; global.css is imported in
+    // preview.tsx.
+    cfg.plugins = [fixCssInteropDoctorCjs(), ...(cfg.plugins ?? [])];
     return cfg;
   },
 };
@@ -647,10 +751,19 @@ export default config;
 > is `dannyhw/vite-rnw-example` (NativeWind v4 + Tailwind v3 + autoprefixer).
 
 `packages/ui/.storybook/preview.tsx` — imports `global.css`, wraps every story in the
-theme provider, declares `theme` + `brand` toolbar globals:
+theme provider, declares `theme` + `brand` toolbar globals. Two hard-won rules are baked in:
+(1) hook logic lives in a proper COMPONENT — a `useEffect` directly inside the lowercase
+decorator function violates `react-hooks/rules-of-hooks` and blocks the pre-commit lint;
+(2) **brand overrides MUST be a NativeWind `vars()` overlay** — css-interop resolves semantic
+tokens through its own `vars()` CONTEXT (the provider's style), not the CSS cascade, so
+`root.style.setProperty` alone re-colors `:root` in devtools while components keep the
+default brand. The `vars()` overlay is the exact mechanism a product uses to rebrand (Key
+rulings #8/#11); the DOM class/property sync is kept only as a plain-CSS convenience:
 
 ```tsx
 import * as React from "react";
+import { View } from "react-native";
+import { vars } from "nativewind";
 import type { Preview, Decorator } from "@storybook/react-native-web-vite";
 import "../src/global.css";
 import { ThemeProvider } from "../src/theme-provider";
@@ -666,10 +779,9 @@ const BRAND_VARS: Record<string, Record<string, string>> = {
   },
 };
 
-const withTheme: Decorator = (Story, ctx) => {
-  const theme = (ctx.globals.theme as "light" | "dark") ?? "light";
-  const brand = (ctx.globals.brand as string) ?? "template";
-
+// DOM sync as a COMPONENT (rules-of-hooks) — plain-CSS convenience only; component
+// re-theming flows through the vars() overlay below, NOT through these root properties.
+function ThemeGlobals({ theme, brand }: { theme: string; brand: string }) {
   React.useEffect(() => {
     const root = document.documentElement;
     root.classList.toggle("dark", theme === "dark");
@@ -677,10 +789,18 @@ const withTheme: Decorator = (Story, ctx) => {
     Object.entries(overrides).forEach(([k, v]) => root.style.setProperty(k, v));
     return () => Object.keys(overrides).forEach((k) => root.style.removeProperty(k));
   }, [theme, brand]);
+  return null;
+}
 
+const withTheme: Decorator = (Story, ctx) => {
+  const theme = (ctx.globals.theme as "light" | "dark") ?? "light";
+  const brand = (ctx.globals.brand as string) ?? "template";
   return (
     <ThemeProvider theme={theme}>
-      <Story />
+      <ThemeGlobals theme={theme} brand={brand} />
+      <View style={vars(BRAND_VARS[brand] ?? {})} className="flex-1">
+        <Story />
+      </View>
     </ThemeProvider>
   );
 };
@@ -750,6 +870,11 @@ per variant; `argTypes` may be derived from each component's cva config.)
 ```bash
 pnpm --filter @platform/ui storybook        # dev server on :6006
 pnpm --filter @platform/ui build-storybook  # -> storybook-static/ + index.json
+# MANDATORY: LOAD a story from the STATIC build (build exit 0 + valid index.json is NOT
+# sufficient — dev mode converts CJS on the fly, the production rollup pass does not; a
+# broken static build renders nothing at runtime and Phase 8's VR runner trips over it):
+npx serve packages/ui/storybook-static -l 6007
+#   -> open http://localhost:6007/iframe.html?id=ui-button--default — the story must RENDER.
 ```
 
 > Storybook dev port: **6006** (Storybook's default) — confirmed not to clash with the app's
@@ -823,10 +948,14 @@ parser; valid values are `react | html | swift | compose`):
 {
   "codeConnect": {
     "parser": "react",
-    "include": ["packages/ui/src/**/*.figma.tsx"]
+    "include": ["packages/ui/src/**/*.figma.tsx", "packages/ui/src/components/**/*.tsx"]
   }
 }
 ```
+
+> The `include` globs MUST also cover the component **source** files (second glob), not just
+> the `*.figma.tsx` maps — otherwise every `import { Button } from "./button"` in a map
+> produces an import-resolution warning on parse.
 
 > ⚠️ Filename collision: the **token-pipeline** config (step (e)) is named **`tokens.config.json`**
 > (NOT `figma.config.json`) specifically to avoid colliding with Code Connect's own
@@ -838,8 +967,10 @@ parser; valid values are `react | html | swift | compose`):
 
 ```bash
 # Validate / publish maps. The Code Connect CLI reads FIGMA_ACCESS_TOKEN (or --token) —
-# NOT FIGMA_TOKEN. Token needs scopes code_connect:write + file_content:read:
-FIGMA_ACCESS_TOKEN=… pnpm dlx @figma/code-connect parse
+# NOT FIGMA_TOKEN. Token needs scopes code_connect:write + file_content:read.
+# NOTE the subcommand shape: the binary is `figma` and there is NO bare `parse` command —
+# it is `figma connect parse`:
+FIGMA_ACCESS_TOKEN=… pnpm exec figma connect parse
 # publish (figma connect publish) is run during /bootstrap-design-system, not on every build.
 ```
 
@@ -856,7 +987,7 @@ live in-repo as source.
 
 ---
 
-### (e) Figma token pipeline — `scripts/figma-tokens.mjs` (source-abstracted) + `figma.config.json` + Style Dictionary
+### (e) Figma token pipeline — `scripts/figma-tokens.mjs` (source-abstracted) + `tokens.config.json` + Style Dictionary
 
 **Files**
 
@@ -945,6 +1076,25 @@ StyleDictionary.registerFormat({
   format: ({ dictionary }) => emitThemeTs(groupByMode(dictionary.allTokens)),
 });
 
+// CSS format: co-generate the FULL global.css. The stock `css/variables` format CANNOT do
+// this job: it would clobber the leading @tailwind directives and can only emit ONE selector
+// block per file — global.css needs BOTH `:root` (light) and `.dark:root` (dark).
+StyleDictionary.registerFormat({
+  name: "css/tailwind-globals",
+  format: ({ dictionary }) => {
+    const modes = groupByMode(dictionary.allTokens);
+    const block = (selector, vars) =>
+      `  ${selector} {\n` +
+      Object.entries(vars).map(([k, v]) => `    ${k}: ${v};`).join("\n") +
+      `\n  }`;
+    return (
+      `@tailwind base;\n@tailwind components;\n@tailwind utilities;\n\n` +
+      `/* NOTE: regenerated by scripts/figma-tokens.mjs — do NOT hand-edit. */\n` +
+      `@layer base {\n${block(":root", modes.light)}\n${block(".dark:root", modes.dark)}\n}\n`
+    );
+  },
+});
+
 function emitThemeTs(modesByName) {
   const order = ["light", "dark"]; // resolved per product brand mode pair
   const block = (name) =>
@@ -958,12 +1108,17 @@ function emitThemeTs(modesByName) {
 const tokens = await loadSource();
 const sd = new StyleDictionary({
   tokens,
+  // The same semantic names exist in both modes BY DESIGN — silence SD's name-collision
+  // warning rather than renaming tokens.
+  log: { warnings: "disabled" },
   platforms: {
-    // WEB: stock css/variables format -> :root (light) + .dark (dark) blocks in global.css.
+    // WEB: custom css/tailwind-globals format -> the COMPLETE global.css (@tailwind
+    // directives + :root/.dark:root blocks). Outputs must be byte-identical to the committed
+    // files (idempotent + drift-free).
     web: {
       transforms: ["color/hsl-channels"],
       buildPath: "packages/ui/src/",
-      files: [{ destination: "global.css", format: "css/variables", options: { selector: ":root" } }],
+      files: [{ destination: "global.css", format: "css/tailwind-globals" }],
     },
     // NATIVE: custom JS format -> theme.ts vars() objects.
     native: {
@@ -981,11 +1136,13 @@ console.log("regenerated global.css (web) + theme.ts (native)");
 > registers a **custom value transform** (`color/hsl-channels`) because SD's stock color
 > transforms emit hex/rgb, but this stack needs space-separated HSL channels to feed the
 > `hsl(var(--x))` Tailwind preset; then it co-generates BOTH targets from one resolved token
-> tree: the stock **`css/variables`** format writes the web `:root`/`.dark` blocks in
-> `global.css`, and a small **JS format** writes the native `theme.ts` `vars()` objects. This
-> resolves the prior "does it also rewrite global.css?" TODO — **yes, both web and native are
-> co-generated**, matching the PHILOSOPHY's "both derive from the same modes". SD v5 is **ESM-only
-> + DTCG-default**, which is why the script is `.mjs` and the fixture is DTCG.
+> tree: the custom **`css/tailwind-globals`** format writes the COMPLETE web `global.css`
+> (stock `css/variables` cannot — it clobbers the `@tailwind` directives and emits only one
+> selector block per file, where two are needed), and a small **JS format** writes the native
+> `theme.ts` `vars()` objects. This resolves the prior "does it also rewrite global.css?" TODO
+> — **yes, both web and native are co-generated**, matching the PHILOSOPHY's "both derive from
+> the same modes". SD v5 is **ESM-only + DTCG-default**, which is why the script is `.mjs` and
+> the fixture is DTCG.
 
 `packages/ui/figma/tokens.json` — the committed Tokens Studio fixture **in DTCG format** (the
 default source so the pipeline runs in CI with **no** Figma file): `light`/`dark` token sets
@@ -994,8 +1151,10 @@ Tokens Studio's native JSON is NOT plain Style-Dictionary format — export in *
 `@tokens-studio/sd-transforms` (or SD's DTCG parser) resolve `{alias}` references + set
 layering.
 
-Add `style-dictionary` (exact pin, **v5 / 5.4.x**) — and, if consuming Tokens Studio exports,
-`@tokens-studio/sd-transforms` — as root devDependencies.
+Add `style-dictionary` (exact pin, **v5** — 5.5.0 as of 2026-07-05) as a root devDependency.
+`@tokens-studio/sd-transforms` is only needed if the token source actually uses `{alias}`
+references / set layering — the plain DTCG fixture shipped here has none, so skip it until a
+real Tokens Studio export introduces aliases.
 
 **Commands**
 
@@ -1072,7 +1231,7 @@ variables, modes not mapping to light/dark/brand, non-code-friendly variant valu
 with design BEFORE importing.
 
 Step 1 — establish tokens (keystone): fix the canonical CSS-var contract; map Figma
-semantic variables → those names in figma.config.json; run scripts/figma-tokens.mjs →
+semantic variables → those names in tokens.config.json; run scripts/figma-tokens.mjs →
 packages/ui default theme.ts + global.css. (If no Figma file yet, run against the committed
 Tokens Studio fixture.)
 
@@ -1148,27 +1307,44 @@ packages/core/src/persist.native.ts # AsyncStorage persister
   "private": true,
   "main": "./src/index.ts",
   "types": "./src/index.ts",
-  "scripts": { "lint": "eslint .", "typecheck": "tsc --noEmit", "test": "jest" },
+  "scripts": {
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
+    "test": "jest --passWithNoTests"
+  },
   "dependencies": {
-    "@tanstack/react-query": "5.101.0",
-    "@tanstack/react-query-persist-client": "5.101.0",
-    "@tanstack/query-async-storage-persister": "5.101.0",
-    "@tanstack/query-sync-storage-persister": "5.101.0"
+    "@tanstack/react-query": "5.101.2",
+    "@tanstack/react-query-persist-client": "5.101.2",
+    "@tanstack/query-async-storage-persister": "5.101.2",
+    "@tanstack/query-sync-storage-persister": "5.101.2"
   },
   "peerDependencies": {
     "@react-native-async-storage/async-storage": "*",
     "react": "*"
+  },
+  "devDependencies": {
+    "@platform/config": "workspace:*",
+    "expo": "56.0.14",
+    "react": "19.2.3",
+    "react-native": "0.85.3",
+    "@react-native-async-storage/async-storage": "2.2.0",
+    "@types/react": "~19.2.0"
   }
 }
 ```
 
-> Pins refreshed to the current TanStack Query **v5 (5.101.x)** line (June 2026) — keep all
+> Pins refreshed to the current TanStack Query **v5 (5.101.x)** line — keep all
 > four `@tanstack/*` packages in lockstep on the same 5.10x version (they version together).
 > There is no React TanStack Query v6; v5 is current. `@tanstack/query-sync-storage-persister`
 > (web persister, used by `persist.web.ts` below) belongs here too. Install
-> `@react-native-async-storage/async-storage` via `expo install` so it matches SDK 56 (current
-> line 3.1.x). Zustand (used by the app shell's theme store in step (h)) is **v5 (5.0.x)** —
-> `import { create } from "zustand"`.
+> `@react-native-async-storage/async-storage` via `expo install` so it matches SDK 56 — the
+> **SDK 56 pairing is 2.2.0** (npm-latest is a 3.1.x line that is NOT the SDK pairing; trust
+> `expo install`, not npm latest). Zustand (used by the app shell's theme store in step (h))
+> is **v5 (5.0.x)** — `import { create } from "zustand"`. The explicit SDK-pinned devDeps
+> exist for the same reason as in `packages/ui`: pnpm 11 does not materialize `"*"` peers, so
+> standalone `tsc` fails without them; keep the versions identical to the app's anchors so
+> pnpm dedupes. `"test": "jest --passWithNoTests"` because a bare `jest` exits 1 ("no tests
+> found") in a test-less workspace and fails the pre-push affected gate.
 
 `packages/core/src/env.ts` (publishable-only `EXPO_PUBLIC_*`):
 
@@ -1245,7 +1421,10 @@ products/_template/app/tailwind.config.js
 products/_template/app/global.css
 products/_template/app/theme.ts
 products/_template/app/tsconfig.json
+products/_template/app/nativewind-env.d.ts   # className prop types (same reason as packages/ui — per-program)
 products/_template/app/.env.development
+products/_template/app/.env.staging          # committed, clearly-marked placeholders (see note below)
+products/_template/app/.env.production       # committed, clearly-marked placeholders (see note below)
 products/_template/app/features/settings/use-theme.ts
 products/_template/app/app/_layout.tsx
 products/_template/app/app/(tabs)/_layout.tsx
@@ -1268,11 +1447,14 @@ products/_template/app/app/(tabs)/settings.tsx
     "export:web": "expo export --platform web",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
-    "test": "jest"
+    "test": "jest --passWithNoTests"
   },
   "dependencies": {
     "@platform/ui": "workspace:*",
     "@platform/core": "workspace:*",
+    "@tanstack/react-query": "5.101.2",
+    "@tanstack/react-query-persist-client": "5.101.2",
+    "zustand": "5.0.14",
     "expo": "*",
     "expo-router": "*",
     "nativewind": "*",
@@ -1291,7 +1473,14 @@ products/_template/app/app/(tabs)/settings.tsx
 > Install Expo SDK deps with `expo install` so versions match the SDK (do not hand-pin
 > Expo packages — this includes `react-native-web`, which `expo install` resolves to the
 > version SDK 56 bundles; drop any `"*"`). Target **SDK 56 / RN 0.85**; safe-harbor fallback
-> **SDK 54** (NOT 55 — see Gotchas).
+> **SDK 54** (NOT 55 — see Gotchas; the fallback proved unnecessary in the 2026-07-05 run).
+> **Every package the app's source imports must be DECLARED here** — `_layout.tsx` imports
+> `@tanstack/react-query` + `@tanstack/react-query-persist-client` and `use-theme.ts` imports
+> `zustand`; relying on hoisting for undeclared imports works until it silently doesn't.
+> Two SDK-pairing traps: `@react-native-async-storage/async-storage` pairs at **2.2.0** for
+> SDK 56 (npm-latest 3.1.x is NOT the pairing), and if `react-native-reanimated` is ever
+> added it must be pinned **EXACT** (`~4.3.1` resolved 4.3.2 and `expo install --check`
+> flagged it).
 
 `products/_template/app/app.config.ts` (Key ruling **#1/#2** — `web.output: "single"` SPA;
 EAS Update needs `updates.url` + a `runtimeVersion` policy, not just `projectId`):
@@ -1368,14 +1557,16 @@ module.exports = function (api) {
 ```
 
 `products/_template/app/tailwind.config.js` (cross-package content glob via
-`require.resolve` — the gotcha; `packages/ui` has NO tailwind config of its own):
+`require.resolve` — the gotcha; `packages/ui` has NO tailwind config for app consumption):
 
 ```js
 const path = require("node:path");
 
 /** @type {import('tailwindcss').Config} */
 module.exports = {
-  presets: [require("@platform/config/tailwind-preset")],
+  // require("nativewind/preset") is MANDATORY: withNativeWind (metro.config.js) hard-errors
+  // with "Tailwind CSS has not been configured with the NativeWind preset" without it.
+  presets: [require("nativewind/preset"), require("@platform/config/tailwind-preset")],
   content: [
     "./app/**/*.{ts,tsx}",
     "./features/**/*.{ts,tsx}",
@@ -1383,6 +1574,23 @@ module.exports = {
   ],
 };
 ```
+
+> The `require.resolve("@platform/ui/package.json")` glob is exactly why `@platform/ui`'s
+> exports map carries the `"./package.json": "./package.json"` passthrough (step a) — without
+> it `expo export` fails with `ERR_PACKAGE_PATH_NOT_EXPORTED`.
+
+**Committed per-env files — create all THREE now** (`.env.development`, `.env.staging`,
+`.env.production`), per the PHILOSOPHY tree. Staging/production carry **clearly-marked
+placeholders** until real infra exists (fly naming `<name>-api-stg|prod.fly.dev`, TODO
+supabase values); real values are selected per platform (Vercel/EAS env) in Phase 8. This is
+not optional polish: **`expo export` runs with `NODE_ENV=production`**, so with no
+`.env.production` the exported bundle silently bakes `env.ts`'s hard-coded localhost fallback
+— which is exactly what Phase 5's desktop packaging would then ship. For local full-stack
+testing of exported bundles, override with a gitignored `app/.env.local`.
+
+> **Metro cache gotcha:** `EXPO_PUBLIC_*` env changes do NOT bust Metro's transform cache —
+> after changing env values, re-export with `expo export --clear` (turbo `--force` is not
+> enough; the cache is Metro's own).
 
 `products/_template/app/global.css` — product's CSS-var VALUES (defaults from the preset;
 products override here). For the template, import the package defaults or inline the same
@@ -1525,17 +1733,20 @@ packages/ui/src/components/ui/__tests__/button.test.tsx
 module.exports = {
   preset: "jest-expo",
   setupFilesAfterEnv: ["<rootDir>/jest.setup.ts"],
-  moduleNameMapper: { "^@/(.*)$": "<rootDir>/src/$1" },
   transformIgnorePatterns: [
     "node_modules/(?!((jest-)?react-native|@react-native(-community)?|expo(nent)?|@expo(nent)?/.*|@rn-primitives/.*|nativewind|react-native-css-interop|class-variance-authority|@platform/.*))",
   ],
 };
 ```
 
-`packages/ui/jest.setup.ts` (optional — matchers auto-register; kept for explicitness):
+(No `moduleNameMapper` — package imports are relative, per step (a); there is no `@/` alias.)
+
+`packages/ui/jest.setup.ts` — import the PACKAGE ROOT. RNTL 14 **removed** the
+`/extend-expect` subpath (importing it fails jest startup with "cannot find module");
+matchers auto-register on any RNTL import:
 
 ```ts
-import "@testing-library/react-native/extend-expect";
+import "@testing-library/react-native";
 ```
 
 > The `transformIgnorePatterns` allowlist above is a hand-maintained literal regex — a common
@@ -1575,15 +1786,16 @@ describe("Button", () => {
 > awaits the press. v14 requires React 19.0+ / RN 0.78+ — compatible with SDK 56's React 19.2
 > / RN 0.85. Pin `@testing-library/react-native@14.x` exact.
 
-Add devDeps to `packages/ui/package.json`: `jest`, **`jest-expo` (56.0.4 — the SDK-56-aligned
-release; install via `expo install jest-expo jest` so it matches the SDK)**, and
-`@testing-library/react-native` (14.x). **Do NOT add `@testing-library/jest-native`** — it is
-deprecated and unmaintained; its matchers (including `toBeOnTheScreen`) are **built into RNTL
-≥ 12.4 and auto-register on any RNTL import**, so the `jest.setup.ts` `extend-expect` line is
-optional (kept below for explicitness / TS types). Do **not** blindly pin `react-test-renderer`:
-React 19 deprecated it and RNTL v14 dropped it as a peer in favor of React 19's built-in test
-renderer — only add it if RNTL v14's installed peer deps explicitly require it (verify at
-install time), otherwise it just creates version-conflict noise.
+Add devDeps to `packages/ui/package.json`: **`jest` pinned `29.7.0`** (jest-expo 56 is
+jest-29-based — do NOT float to jest 30), **`jest-expo` (56.0.x — the SDK-56-aligned release,
+56.0.5 as of 2026-07-05; install via `expo install jest-expo jest` so it matches the SDK)**,
+`@testing-library/react-native` (14.x — 14.0.1 verified), and **`test-renderer` (1.2.0)** —
+the React-19 replacement for the deprecated `react-test-renderer`, and an RNTL 14 peer
+dependency (tests fail to run without it). **Do NOT add `@testing-library/jest-native`** — it
+is deprecated and unmaintained; its matchers (including `toBeOnTheScreen`) are **built into
+RNTL ≥ 12.4 and auto-register on any RNTL import** (hence the package-root import in
+`jest.setup.ts`). Do **not** add the old `react-test-renderer` package: React 19 deprecated
+it and RNTL v14 replaced it with the `test-renderer` package above.
 
 **Commands**
 
@@ -1601,23 +1813,18 @@ relevant for this pure-UI test).
 
 ## Gotchas & pitfalls
 
-- **NativeWind v4 ↔ Expo SDK 56 compat (the phase's headline risk).** Phase 2 must
-  *settle* this. Use **NativeWind v4** (v5 is pre-release — forbidden; v5 moves to Tailwind
-  v4.1+ CSS-first config and deprecates the `vars()`/`cssInterop` surface this stack relies
-  on). NativeWind v4 is **actively maintained** (4.2.x patch line shipped through June 2026)
-  and has long supported the New Architecture, so there is no *version-level* blocker — but
-  there is **no official source confirming v4 runs cleanly on SDK 56 / RN 0.85 + New Arch +
-  Hermes v1**; the only on-record official NativeWind↔Expo pairing is **SDK 54**, and the
-  maintainer has stated releases are no longer pegged to specific SDKs. NativeWind's metro
-  transform + `react-native-css-interop` are exactly the layer most exposed to a New-Arch /
-  RN-0.85 break. Decide empirically: scaffold the app, run `expo start` web + native, confirm
-  `className` utilities resolve and the dark toggle works under New Arch / Hermes v1. **If
-  blocked on a known SDK-56 incompat, the safe-harbor fallback is Expo SDK 54, NOT 55** — SDK
-  55 is *also* New-Architecture-only (no legacy-arch escape hatch) and is *not* the
-  officially-NativeWind-validated SDK, so dropping to 55 may not fix a New-Arch/interop break;
-  SDK 54 is the last officially NativeWind-validated SDK and the last with a legacy-arch
-  option. Pin `nativewind` AND `react-native-css-interop` exact. Record the outcome in the
-  commit + Open questions.
+- **NativeWind v4 ↔ Expo SDK 56 compat — ✅ RESOLVED 2026-07-05: the pairing WORKS.**
+  Verified: nativewind `4.2.6` + react-native-css-interop `0.2.6` on expo `56.0.14` /
+  RN `0.85.3` / React `19.2.3` (New Arch, Hermes v1). Evidence: `expo export --platform web`
+  emits a SPA whose CSS carries the semantic-token utilities (`hsl(var(--primary))`,
+  `--background` blocks), and `expo export --platform android` compiles the full NativeWind
+  transform to a Hermes `.hbc` bundle. The SDK 54 safe harbor was NOT needed (and NOT
+  exercised). Background, still relevant on future SDK bumps: use **NativeWind v4** (v5 is
+  pre-release — forbidden; v5 moves to Tailwind v4.1+ CSS-first config and deprecates the
+  `vars()`/`cssInterop` surface this stack relies on); if a future SDK bump breaks the
+  interop layer, **the safe-harbor fallback is Expo SDK 54, NOT 55** — SDK 55 is *also*
+  New-Architecture-only and not NativeWind-validated; 54 is the last officially-validated SDK
+  with a legacy-arch escape hatch. Pin `nativewind` AND `react-native-css-interop` exact.
 - **Hoisted linker + metro paths (Key ruling #6).** `pnpm-workspace.yaml` must keep
   `nodeLinker: hoisted` (pnpm 11's home for it; the old `.npmrc` `node-linker` key is
   silently ignored on pnpm 11); metro config MUST set `watchFolders=[workspaceRoot]` and
@@ -1626,8 +1833,18 @@ relevant for this pure-UI test).
 - **Cross-package tailwind content globs.** Use
   `path.dirname(require.resolve("@platform/ui/package.json")) + "/src/**/*.{ts,tsx}"` — a
   hardcoded `../../../packages/ui/...` relative path breaks under hoisting and from the
-  generated `demo` product. `packages/ui` has **no tailwind config of its own**; the app's
-  config owns the content globs.
+  generated `demo` product. Requires the `"./package.json"` exports passthrough in
+  `@platform/ui` (step a). `packages/ui` has **no tailwind config for APP consumption**; the
+  app's config owns the app content globs (the workbench-only config in step (c) exists
+  solely for Storybook's PostCSS pipeline).
+- **Every app/workbench `tailwind.config.js` MUST list `require("nativewind/preset")` first
+  in `presets`.** `withNativeWind` hard-errors at export time ("Tailwind CSS has not been
+  configured with the NativeWind preset") without it — the shared `@platform/config` preset
+  alone is not enough.
+- **Verify the STATIC Storybook build by loading a story, not just building it.** Dev mode's
+  dep optimizer converts CJS on the fly; the production rollup pass does not — without the
+  `fix-css-interop-doctor-cjs` plugin (step c) the static build dies with `ReferenceError:
+  exports is not defined` while `storybook build` exits 0.
 - **Pin `@rn-primitives/*` exact.** Pre-1.0; a caret bump can break owned components. Same
   discipline as `@hey-api/*` (Phase 4) and `nativewind`.
 - **`react-native` → `react-native-web` alias is AUTO-HANDLED in Storybook Vite — do NOT
@@ -1661,19 +1878,22 @@ Run each; expected result maps to the DoD item in brackets.
 # [1][3][4] types + tokens-only
 pnpm --filter @platform/ui exec tsc --noEmit                 # no errors
 git grep -nE '#[0-9a-fA-F]{3,6}|rgb\(' packages/ui/src/components   # NO output
-git grep -n 'hsl(var(' packages/config/tailwind-preset.js    # mappings present
+git grep -n 'hsl(var(' packages/config/tailwind-preset.cjs   # mappings present
 
-# [5][6] Storybook gallery + toolbars + build
+# [5][6] Storybook gallery + toolbars + build — AND a story loaded from the STATIC build
 pnpm --filter @platform/ui storybook
 #   -> open :6006; UI/Button shows Default/Secondary/Destructive/Outline/Ghost/Small/Large;
 #      Theme toolbar flips light<->dark live; Brand toolbar flips template<->demo (primary
 #      color changes) live.
 pnpm --filter @platform/ui build-storybook
 test -f packages/ui/storybook-static/index.json && echo "VR index OK"
+npx serve packages/ui/storybook-static -l 6007
+#   -> http://localhost:6007/iframe.html?id=ui-button--default must RENDER (build success
+#      alone does NOT prove the static build works — see the CJS-doctor gotcha).
 
-# [7] Code Connect maps present + parse
+# [7] Code Connect maps present + parse (subcommand form — there is no bare `parse`)
 ls packages/ui/src/components/ui/*.figma.tsx                 # 4 files
-pnpm dlx @figma/code-connect parse                           # parses (placeholder URLs OK)
+pnpm exec figma connect parse                                # parses (placeholder URLs OK)
 
 # [8] token pipeline idempotent (co-generates theme.ts + global.css via Style Dictionary v5)
 node scripts/figma-tokens.mjs
@@ -1710,7 +1930,7 @@ turbo run test --filter=@platform/ui                         # Button test green
 switching; `node scripts/figma-tokens.mjs` regenerates `theme.ts`; `/add-component` yields
 primitive + story + Code Connect + baseline; Expo Go on device matches; `turbo run
 export:web` + `npx serve dist` works; `turbo run test` runs the RNTL test. NativeWind
-v4↔SDK56 compat decision recorded (fallback target = SDK 54).
+v4↔SDK56 compat: ✅ RESOLVED WORKING (2026-07-05 run; fallback SDK 54 never needed).
 
 ---
 
@@ -1733,40 +1953,48 @@ the repo's git conventions (branch off the default branch first).
 
 ## Open questions / deferred
 
-- **⚠️ NativeWind v4 ↔ SDK 56 outcome** — policy: **target SDK 56, fall back to SDK 54 only
-  if NativeWind v4 proves unworkable; do NOT downgrade preemptively.** This is the one item
-  that can only be settled empirically (by building): if SDK 56 is unworkable with NativeWind
-  v4, fall back to **SDK 54** (NOT 55 — 55 is also New-Arch-only and not the
-  NativeWind-validated SDK; 54 is the last officially-validated SDK with a legacy-arch escape
-  hatch) and record the pin.
+- **✅ RESOLVED — NativeWind v4 ↔ SDK 56 outcome** — the pairing works (2026-07-05 run):
+  nativewind `4.2.6` + react-native-css-interop `0.2.6` on expo `56.0.14` / RN `0.85.3` /
+  React `19.2.3`, New Arch, Hermes v1; web + android exports both verified. Fallback policy
+  retained for future SDK bumps: fall back to **SDK 54** (never 55) only if the interop layer
+  breaks; do NOT downgrade preemptively.
 - **⚠️ Exact version pins** — freeze to what the CLI/`expo install` emit at execution time;
-  PHILOSOPHY.md names the packages, not the numbers. Current reference values: `nativewind 4.2.5`
-  (+ pin `react-native-css-interop` exact),
-  `@rn-primitives/* 1.4.0` (slot/types/portal), `class-variance-authority 0.7.1`, `clsx 2.1.1`,
-  `tailwind-merge 2.6.x` (Tailwind-v3 line — do NOT use 3.x, which assumes Tailwind v4),
-  `tailwindcss@^3.4` (NOT v4), Storybook + `@storybook/react-native-web-vite` `9.1.x`,
-  `@tanstack/* 5.101.x`, `zustand 5.0.x`, `@react-native-async-storage/async-storage 3.1.x`,
-  `style-dictionary 5.4.x`, `@figma/code-connect 1.4.8`, `@react-native-reusables/cli 0.7.1`,
-  `jest-expo 56.0.4`, `@testing-library/react-native 14.x`.
+  PHILOSOPHY.md names the packages, not the numbers. Reference values from the 2026-07-05 run:
+  `nativewind 4.2.6` + `react-native-css-interop 0.2.6` (both exact),
+  `@rn-primitives/* 1.5.2` (slot/types/portal), `class-variance-authority 0.7.1`, `clsx 2.1.1`,
+  `tailwind-merge 2.6.1` (Tailwind-v3 line — do NOT use 3.x, which assumes Tailwind v4;
+  latest is 3.6.0, deliberately not taken), `tailwindcss 3.4.19` (NOT v4 — latest is 4.3.x,
+  locked out), Storybook + `@storybook/react-native-web-vite` `9.1.20` (Storybook 10 exists,
+  locked out), `vite 7.3.6` (vite 8 exists but the SB framework peers cap at ^7),
+  `@tanstack/* 5.101.2`, `zustand 5.0.14`, `@react-native-async-storage/async-storage 2.2.0`
+  (the SDK 56 pairing — npm-latest 3.1.x is NOT it), `react-native-reanimated` EXACT `4.3.1`
+  if used, `style-dictionary 5.5.0`, `@figma/code-connect 1.4.8`,
+  `@react-native-reusables/cli 0.7.1`, `jest 29.7.0`, `jest-expo 56.0.5`,
+  `@testing-library/react-native 14.0.1` + `test-renderer 1.2.0`, expo `56.0.14`
+  (expo latest is 57.x, locked to 56).
 - **✅ RESOLVED — Storybook dev port** — `6006` is Storybook's default and does not clash
   with Expo's fixed `8081`. Keep 6006. (Storybook docs.)
-- **⚠️ Real Figma file key + mode IDs** — `figma.config.json` ships `TODO-*` placeholders;
+- **⚠️ Real Figma file key + mode IDs** — `tokens.config.json` ships `TODO-MODE-ID-<NAME>` placeholders (the convention the Phase 7 generator matches — it also pre-seeds the `demo` entry);
   filled during `/bootstrap-design-system` against the real handed-over library. Until then
   the committed Tokens Studio fixture is the source (DoD #8).
 - **✅ RESOLVED — `theme.ts` + global.css co-generation.** `figma-tokens.mjs` now
-  co-generates **both** via Style Dictionary v5: the stock `css/variables` format writes the
-  web `:root`/`.dark` blocks in `global.css` and a JS format writes the native `theme.ts`
-  `vars()` objects, both from one resolved token tree (a custom `color/hsl-channels` transform
-  emits the space-separated HSL channels the `hsl(var(--x))` preset needs). Matches PHILOSOPHY.md's
-  "both web and native derive from the same modes". (Style Dictionary docs / SD v5 migration.)
+  co-generates **both** via Style Dictionary v5: the custom `css/tailwind-globals` format
+  writes the COMPLETE web `global.css` (`@tailwind` directives + `:root`/`.dark:root` blocks
+  — the stock `css/variables` format cannot: it clobbers the directives and emits one selector
+  block per file) and a JS format writes the native `theme.ts` `vars()` objects, both from one
+  resolved token tree (a custom `color/hsl-channels` transform emits the space-separated HSL
+  channels the `hsl(var(--x))` preset needs). Verified idempotent + byte-identical to the
+  committed files. Matches PHILOSOPHY.md's "both web and native derive from the same modes".
 - **VR baseline tooling wiring** (`/add-component` step 6 + nightly `e2e-nightly.yml`) — the
   Playwright-over-`storybook-static/index.json` runner is defined in Testing strategy but
   fully wired into nightly CI in **Phase 8**; Phase 2 only needs the static build + local
   baseline capability. The VR sweep visits `iframe.html?id=<story>&globals=theme:<t>` (the
-  `globals=key:value` URL form — a bare `theme=dark` query does NOT work). Since the locked
-  workbench feature is the **brand switcher**, the matrix should sweep `brand` too
-  (`globals=theme:dark,brand:demo`), not just `{light,dark}` — recommend baselining the `demo`
-  brand mode as well (a product decision finalized with the Phase 8 wiring).
+  `globals=key:value` URL form — a bare `theme=dark` query does NOT work). **Multiple globals
+  are separated with `;`, NOT `,`** — `globals=theme:dark;brand:demo` works;
+  `globals=theme:dark,brand:demo` silently applies NEITHER. Since the locked workbench
+  feature is the **brand switcher**, the matrix should sweep `brand` too, not just
+  `{light,dark}` — recommend baselining the `demo` brand mode as well (a product decision
+  finalized with the Phase 8 wiring).
 - **`packages/core` later modules** (`supabase.ts`, `auth.ts`, `realtime.ts`,
   `notifications.ts`, `storage.ts`, `api.ts`, `sentry.ts`) — deferred to Phases 6/8 per the
   phase table; intentionally NOT built here.

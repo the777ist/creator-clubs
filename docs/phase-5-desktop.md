@@ -56,9 +56,16 @@ confirm:
 4. **Electron version target (resolved):** pin **Electron `42.4.0`** exact (stable since
    2026-05-07; Chromium 148, **Node 24.15.0**). Supported majors under the "latest 3 stable"
    policy are **42 / 41 / 40** — 42.4.0 has the longest support runway; do NOT use 43 (alpha/beta).
-   Companion pins: **electron-builder `26.15.3`** (NOT v27 — alpha, and removes implicit
-   publishing), **electron-updater `6.8.9`**, `@types/node` on the **Node 24** line. All pins
-   are filled into step 1's `package.json`.
+   Companion pins: **electron-builder `26.15.6`** (NOT v27 — alpha, and removes implicit
+   publishing; 26.15.6 ships the "bundle a workspace sub-package's production dependencies
+   when the PM resolves to the workspace root" fix this monorepo needs — plus the committed
+   `pnpm patch`, see step 1), **electron-updater `6.8.9`**, `@types/node` on the **Node 24**
+   line. All pins are filled into step 1's `package.json`.
+5. **pnpm build-script allowlist:** `pnpm-workspace.yaml` `allowBuilds` must gain
+   `electron: true` (binary download) and `electron-winstaller: true` (7-Zip fetch;
+   electron-builder dep) **BEFORE** the install that introduces them. An entry added after
+   the first install does not retro-run the script — the symptom is `electron.exe` missing
+   under `node_modules/electron/dist`; fix with `pnpm rebuild electron` (or a fresh install).
 
 ---
 
@@ -113,13 +120,14 @@ confirm:
     "pack": "electron-builder --dir",
     "dist": "electron-builder",
     "release": "electron-builder --publish always",
+    "lint": "eslint .",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "clean": "node -e \"require('node:fs').rmSync('build',{recursive:true,force:true});require('node:fs').rmSync('renderer',{recursive:true,force:true});require('node:fs').rmSync('release',{recursive:true,force:true})\""
   },
   "devDependencies": {
     "@platform/template-app": "workspace:*",
     "electron": "42.4.0",
-    "electron-builder": "26.15.3",
+    "electron-builder": "26.15.6",
     "typescript": "5.9.3",
     "@types/node": "^24.3.0"
   },
@@ -129,11 +137,32 @@ confirm:
 }
 ```
 
+> **`"lint": "eslint ."` is not optional.** Every non-generated workspace lints by
+> convention; omit it and `turbo run lint` silently skips desktop — `main.ts`/`preload.ts`/
+> `copy-renderer.mjs` then have zero lint coverage. The shared `@platform/config` flat
+> config already ignores this workspace's artifact dirs (`**/build/**`, `**/renderer/**`,
+> `**/release/**` — Phase 1 Step 7b), so a plain `eslint .` is clean.
+
 **Commands:**
 ```bash
-# after editing pnpm-workspace.yaml glob already includes products/*/desktop
-pnpm install
+# BEFORE installing: add to pnpm-workspace.yaml allowBuilds (see Prerequisite #5):
+#   electron: true
+#   electron-winstaller: true
+# (pnpm-workspace.yaml glob already includes products/*/desktop)
+CI=1 pnpm install
 ```
+
+> **Committed patch: `patches/app-builder-lib@26.15.6.patch` (wired via
+> `patchedDependencies` in `pnpm-workspace.yaml`).** On this workspace, electron-builder's
+> pnpm node-module collector dies ("Node module collector process exited with code
+> 4294963230"): its exact command `pnpm list --prod --json --depth Infinity` exhausts file
+> descriptors (**EMFILE**) walking every hoisted package.json — reproducible on pnpm 11.9.0
+> AND 11.10.0 — and app-builder-lib's collector loop lets the **exception escape** instead of
+> falling through to the `PM.TRAVERSAL` approach its own docstring promises. The patch wraps
+> the collection call in try/catch → warn + continue; the TRAVERSAL collector then resolves
+> the tree correctly (verified: `app.asar` carries compiled main+preload, the SPA renderer,
+> AND `node_modules/electron-updater` + deps). Drop the patch only when the upstream fix
+> lands — re-test `pack` on every electron-builder bump.
 
 **Why:**
 - `name` is **exactly** `@platform/template-desktop` (locked naming). The generator
@@ -153,16 +182,16 @@ pnpm install
 - `pack` = `electron-builder --dir` (the Phase 5 verify gate — unpacked, no signing, no
   publish). `dist` = full installers. `release` = `--publish always` (used by
   `electron-release.yml`, gated on a real repo).
-- Pin every tool **exact** — consistent with the repo-wide pinning stance. Verified pins
-  (June 2026): **Electron `42.4.0`** (stable since 2026-05-07; Chromium 148, **Node 24.15.0**;
+- Pin every tool **exact** — consistent with the repo-wide pinning stance. Verified pins:
+  **Electron `42.4.0`** (stable since 2026-05-07; Chromium 148, **Node 24.15.0**;
   supported majors under the "latest 3 stable" policy are **42 / 41 / 40** — do NOT jump to 43,
-  still alpha/beta), **electron-builder `26.15.3`** (do NOT adopt v27 — `27.0.0-alpha.2` is still
+  still alpha/beta), **electron-builder `26.15.6`** (patch-bumped from 26.15.3 for the
+  workspace-deps fix + carries the committed collector patch above; do NOT adopt v27 —
   alpha **and removes implicit publishing**, see step 7 + Open questions), **electron-updater
   `6.8.9`**. `@types/node` is pinned on the **Node 24 line** (`^24.3.0`, matching step 1's
   `package.json`) so the main-process types match the runtime Electron 42 bundles
-  (Node 24.15.0); `typescript` is current 5.x stable.
-  ⚠️ REVIEW: confirm the exact `typescript` patch (`5.9.3` shown) matches the version the rest
-  of the repo pins.
+  (Node 24.15.0); `typescript 5.9.3` matches the repo's resolved version (✅ confirmed in the
+  2026-07-05 run).
 
 ### 2. TypeScript config for the main/preload process
 
@@ -619,7 +648,7 @@ publish:
   # detection) is deprecated and will be REMOVED in v27 — publish intent must be explicit
   # (`--publish always`/`onTag`). The guide already uses explicit `--publish always` in
   # `electron-release.yml`, so it is ALREADY compliant; this is only a note for a future
-  # bump off the pinned 26.15.3. (v27 is still `27.0.0-alpha.2` — do not adopt yet.)
+  # bump off the pinned 26.15.6. (v27 is still `27.0.0-alpha.2` — do not adopt yet.)
 ```
 
 **Commands:**
@@ -653,7 +682,7 @@ cd products/_template/desktop && pnpm exec electron-builder --dir
   repos). Marked PLACEHOLDER; with the placeholder owner/repo `electron-updater` would 404, which
   is exactly why `main.ts` gates the check on `DESKTOP_RELEASES_CONFIGURED`.
 - **electron-builder v27 forward note:** implicit publishing is removed in v27; the explicit
-  `--publish always` in `electron-release.yml` already complies. Stay on the pinned `26.15.3`
+  `--publish always` in `electron-release.yml` already complies. Stay on the pinned `26.15.6`
   (v27 is alpha) and revisit only on a deliberate bump.
 
 ---
@@ -720,10 +749,24 @@ cd products/_template/desktop && pnpm exec electron-builder --dir
    must contain (not `app://`, and not `app://-/`). PHILOSOPHY.md "API hardening" lists the desktop
    `app://` origin; pin it precisely as `app://-` (the host `-` chosen in `win.loadURL("app://-/")`
    is what determines the origin string — if the host ever changes, the allowlist entry must
-   change with it). Owned by Phase 3; verify empirically once the shell runs (a mismatch is a
-   silent 403 on desktop while web works).
+   change with it). ✅ CONFIRMED live (2026-07-05): in-window probe shows
+   `location.origin === "app://-"` and a cross-origin fetch to the API returns a readable 200
+   with Phase 3's default allowlist entry.
 
-10. **Don't extend `tsconfig.base.json` for the main process.** The base config is `noEmit` +
+10. **`expo export` bakes `.env.production` — the desktop dev loop needs `.env.local`.**
+    `expo export` runs with `NODE_ENV=production`, so a plain
+    `turbo run build --filter=*desktop` bakes the committed `.env.production` **placeholder**
+    API URL into the renderer. For local full-stack desktop testing, override with a
+    gitignored `app/.env.local` — and remember `EXPO_PUBLIC_*` changes do NOT bust Metro's
+    transform cache: re-export with `expo export --clear` (turbo `--force` is not enough; the
+    cache is Metro's own).
+
+11. **Windows: kill `electron.exe`, not the pnpm shim.** Killing `electron .` via the
+    pnpm/.bin shim leaves electron.exe orphans holding any debug/CDP port — kill the exe by
+    PID when scripting the shell's lifecycle (verification harness concern, not a template
+    defect).
+
+12. **Don't extend `tsconfig.base.json` for the main process.** The base config is `noEmit` +
     bundler resolution for RN/web; the Electron main is a Node CJS emit target. Mixing them
     yields "cannot find module ./preload" at runtime because nothing was emitted.
 
@@ -746,8 +789,12 @@ ls products/_template/desktop/build/main.js          # exists
 pnpm --filter @platform/template-desktop run start
 ```
 **Expected:** an Electron window opens showing the **same home/list screen** as
-`localhost:8081` / the web build — same shared `@platform/ui` components, same theme. (If the
-API is up, the items list populates via the generated TanStack hook.)
+`localhost:8081` / the web build — same shared `@platform/ui` components, same theme.
+**Caveat (same as Phase 4 Verify #3):** `/v1/items` is auth-guarded and login only lands in
+Phase 6, so the items list populates only through the dev-token path — gitignored
+`app/.env.local` pointing at a header-injecting proxy (see Phase 4's Verification #3) — and
+remember gotcha #10: re-export with `--clear` after env changes. Without a token the correct
+result is the error/empty state, not items.
 
 ### V2 — navigation works
 In the open window: navigate between routes — tabs (home ↔ settings), toggle dark mode in
@@ -798,7 +845,7 @@ Phase 5 is one feature branch, logically:
 3. **`feat(desktop): electron-builder config (publish placeholder, mac signing gated)`** —
    `electron-builder.yml`.
 4. _(optional)_ **`chore(desktop): verify pinned electron toolchain`** — the pins
-   (Electron `42.4.0`, electron-builder `26.15.3`, electron-updater `6.8.9`, `@types/node@^24`)
+   (Electron `42.4.0`, electron-builder `26.15.6` + app-builder-lib patch, electron-updater `6.8.9`, `@types/node@^24`)
    are filled in step 1; this commit covers any patch-bump after `pnpm install` + verify.
 
 Each commit should leave the repo green for `turbo run typecheck --filter=@platform/template-desktop`.
@@ -811,8 +858,10 @@ proves `--dir` packs locally.
 
 - ✅ RESOLVED — **exact Electron / electron-builder / electron-updater versions.** Pinned
   **Electron `42.4.0`** (stable 2026-05-07; Chromium 148, Node 24.15.0; supported majors 42/41/40
-  — not 43), **electron-builder `26.15.3`** (NOT v27 — alpha + removes implicit publishing),
-  **electron-updater `6.8.9`**, `@types/node` on the Node 24 line. Filled into step 1.
+  — not 43), **electron-builder `26.15.6`** (NOT v27 — alpha + removes implicit publishing)
+  **plus the committed `pnpm patch` on `app-builder-lib`** (collector EMFILE fallthrough —
+  step 1; remove when fixed upstream), **electron-updater `6.8.9`**, `@types/node` on the
+  Node 24 line. Filled into step 1.
 - ✅ RESOLVED — **CJS vs ESM main process.** Keep **CJS** (step 2). ESM main is available on
   Electron 42 but CJS is the deliberate lowest-risk choice — it makes the **before-`ready`**
   `registerSchemesAsPrivileged` call unambiguous (ESM's async-import timing is the risk).
@@ -830,7 +879,9 @@ proves `--dir` packs locally.
   desktop app icons (per-OS `.ico`/`.icns`/`.png`) are not specified by PHILOSOPHY.md. PHILOSOPHY.md's brand
   assets live in `app/assets/brand/` (web favicon/icon) — wiring a regen step to also emit
   desktop icon formats is unspecified. Reuse the brand source when the asset pipeline (Phase 7
-  regen script) is in place.
+  regen script) is in place. Until then, a `--dir` pack uses the default Electron icon —
+  expected, harmless. (Cosmetic sibling: electron-builder warns `author is missed in the
+  package.json`; harmless for `--dir` and irrelevant until real publishing.)
 - **Deferred (per PHILOSOPHY.md testing row):** Playwright `_electron` desktop E2E — only if shell
   logic grows beyond a thin wrapper. Phase 5 ships the launch smoke only.
 - **Deferred to Phase 8:** `electron-release.yml` (3-OS matrix, `--publish always`, tag

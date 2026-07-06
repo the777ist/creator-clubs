@@ -1,10 +1,10 @@
 # Phase 1 — Root tooling
 
-**Goal.** Stand up the empty monorepo's foundational tooling so every later phase plugs into one coherent JS dependency universe and one Turborepo task graph. After this phase the repo has: pinned toolchain (`mise.toml`), pnpm workspace config (`pnpm-workspace.yaml`, which under pnpm 11 now also carries the pnpm settings — `nodeLinker`, `preferFrozenLockfile`, `allowBuilds` — that used to live in `.npmrc`; plus an auth/registry-only `.npmrc`), the root `package.json` with orchestration scripts and shared devDeps, `turbo.json` (Turborepo 2.9 `tasks` graph), strict `tsconfig.base.json`, a `.gitignore` that still allows committed per-env `.env` files, the shared `@platform/config` package (ESLint flat config, Prettier, tailwind preset, tsconfig presets), and `lefthook.yml` git hooks (installed via `pnpm prepare`) wired for a fast staged pre-commit lint and an `--affected` pre-push gate. No product workspaces exist yet, so all turbo runs are clean no-ops.
+**Goal.** Stand up the empty monorepo's foundational tooling so every later phase plugs into one coherent JS dependency universe and one Turborepo task graph. After this phase the repo has: pinned toolchain (`mise.toml`), pnpm workspace config (`pnpm-workspace.yaml`, which under pnpm 11 now also carries the pnpm settings — `nodeLinker`, `preferFrozenLockfile`, `allowBuilds` — that used to live in `.npmrc`; plus an auth/registry-only `.npmrc`), the root `package.json` with orchestration scripts and shared devDeps, `turbo.json` (Turborepo 2.9 `tasks` graph), strict `tsconfig.base.json`, a `.gitignore` that still allows committed per-env `.env` files plus a `.prettierignore` for committed generated artifacts, the shared `@platform/config` package (ESLint flat config, Prettier, tailwind preset, tsconfig presets) **and the root-level consumers that wire it up** (root `eslint.config.mjs`, root `package.json` `"prettier"` key — the lefthook jobs run from the repo root, so the root workspace is a consumer too), and `lefthook.yml` git hooks (installed via `pnpm prepare`) wired for a fast staged pre-commit lint and an `--affected` pre-push gate. No product workspaces exist yet, so all turbo runs are clean no-ops.
 
 **Verify criteria (restated from the Phase 1 row of PHILOSOPHY.md):**
 
-- `mise install && pnpm install && pnpm turbo run lint` runs clean as a no-op (no workspaces match yet, turbo reports "no tasks to run" or all cache-hit, exit 0).
+- `mise install && pnpm install && pnpm turbo run lint` runs clean (exit 0 — the only task is `@platform/config#lint`; product workspaces don't exist yet).
 - A `git commit` triggers the staged-files lint (Prettier + ESLint on staged JS/TS; Ruff on staged `.py` once an api exists).
 - A `git push` triggers the affected gate (`turbo run typecheck test build --affected`).
 
@@ -20,7 +20,9 @@ Before starting Phase 1:
 - **Network access** for `pnpm install` to fetch `turbo`, `prettier`, `lefthook`, ESLint, etc.
 - No infra accounts are required in Phase 1 (no Supabase/Fly/Vercel/EAS yet — those land with the generator in Phase 7).
 
-⚠️ **OPEN / TO CONFIRM:** PHILOSOPHY.md does not pin an exact patch for `mise` itself, nor the host OS. Steps below assume a POSIX shell (the env reports Linux). Adjust shell quoting on Windows.
+⚠️ **OPEN / TO CONFIRM:** PHILOSOPHY.md does not pin an exact patch for `mise` itself, nor the host OS. Steps below assume a POSIX shell (the env reports Linux). Adjust shell quoting on Windows. (A 2026-07-05 run on Windows completed with Git Bash handling every verification command as written; the only Windows-relevant adjustments are noted inline — e.g. invoke lefthook as `pnpm lefthook …` in non-interactive shells, where the workspace devDep is not on bare PATH.)
+
+> **Agent / non-interactive shells:** prefix installs with `CI=1` (`CI=1 pnpm install`). pnpm 11 prompts interactively on some state changes (e.g. a modules-dir purge/rebuild after editing `allowBuilds`), and a non-TTY shell hangs forever waiting for the answer. Interactive human runs are unaffected. This applies to every phase that re-runs `pnpm install` after a config change.
 
 ---
 
@@ -30,8 +32,8 @@ Each bullet is independently testable (see **Verification** for the exact comman
 
 1. **Toolchain pins resolve.** `mise install` succeeds and `mise current` reports node 24, pnpm 11, python 3.13, uv (latest) exactly as pinned in `mise.toml`. `node -v`, `pnpm -v`, `python --version`, `uv --version` all reflect the mise-managed versions.
 2. **Workspace installs clean.** `pnpm install` succeeds with `nodeLinker: hoisted` (set in `pnpm-workspace.yaml`, giving a flat-ish `node_modules`), produces a single `pnpm-lock.yaml`, and runs the `prepare` script which installs Lefthook git hooks.
-3. **Turbo lint is a clean no-op.** `pnpm turbo run lint` exits 0. With only `packages/config` present (which has no lintable source yet) turbo reports no tasks / cache-hit and does not error on the absent product workspaces.
-4. **`@platform/config` is consumable.** The package resolves under the `@platform/*` scope and exposes: `eslint.config.js` (flat), `prettier.json`, `tailwind-preset.js`, and `tsconfig/{base,expo,node}.json`. `pnpm --filter @platform/config exec ls` lists them.
+3. **Turbo lint runs clean.** `pnpm turbo run lint` exits 0. With only `packages/config` present, turbo runs exactly its `lint` task (the Step 7a skeleton ships `"lint": "eslint ."`) and does not error on the absent product workspaces.
+4. **`@platform/config` is consumable — including by the ROOT workspace.** The package resolves under the `@platform/*` scope and exposes: `eslint.config.js` (flat), `prettier.json`, `tailwind-preset.cjs`, and `tsconfig/{base,expo,node}.json`. `pnpm --filter @platform/config exec ls` lists them. The root `eslint.config.mjs` re-exports the shared flat config (ESLint 9 resolves its config from the **cwd**, and the lefthook jobs run from the repo root — without this file every TS/JS commit fails with "could not find eslint.config file"), and the root `package.json` carries `"prettier": "@platform/config/prettier"` so `prettier --find-config-path <any file>` resolves (without it, every hook format runs with Prettier DEFAULTS — width 80, no tailwind class sorting — silently).
 5. **Strict TS base exists.** `tsconfig.base.json` sets `strict: true`, `moduleResolution: "bundler"`, `noEmit: true` and is extendable by downstream workspaces.
 6. **`.gitignore` is correct.** It ignores `node_modules`, build outputs, `.venv`, `.expo`, caches, `.env`, and `.env.local`, but **does NOT** ignore committed per-env files (`.env.development`, `.env.staging`, `.env.production`).
 7. **pre-commit hook fires.** Committing a deliberately mis-formatted `.ts` file is reformatted/flagged by the staged Prettier + ESLint job before the commit completes.
@@ -139,10 +141,12 @@ preferFrozenLockfile: true
 
 # Build-script allowlist. pnpm blocks dependency lifecycle (build) scripts by default; pnpm 11
 # replaced the old `only-built-dependencies` API with this `allowBuilds` map (package → boolean).
-# Empty in Phase 1; add entries as Phase 2+ introduces native tooling that needs a build step:
-#   allowBuilds:
-#     esbuild: true
-allowBuilds: {}
+# lefthook is a Phase 1 devDep whose postinstall places its binary — without this entry the very
+# first `pnpm install` ends with ERR_PNPM_IGNORED_BUILDS (and pnpm stamps a placeholder entry into
+# this file). Later phases append: esbuild (Phase 2 Storybook/Vite), electron + electron-winstaller
+# (Phase 5), @sentry/cli (Phase 8).
+allowBuilds:
+  lefthook: true
 
 # --- workspace globs ---
 packages:
@@ -164,6 +168,8 @@ packages:
 
 Under **pnpm 11** this same file is now also where the pnpm *settings* live: `nodeLinker: hoisted` (relocated from `.npmrc` per ruling #6), `preferFrozenLockfile: true`, and the `allowBuilds` map (the pnpm-11 replacement for the removed `only-built-dependencies`). These keys are silently ignored if left in `.npmrc`, so they MUST be here.
 
+> **`allowBuilds` timing gotcha (applies to every later entry too):** an entry added AFTER the package was first installed does not retro-run its build script — run `pnpm rebuild <pkg>` (or a fresh install) afterwards, and prefer adding the entry BEFORE the install that introduces the package.
+
 ⚠️ **REVIEW:** PHILOSOPHY "Workflows" notes EAS relied on a committed `.npmrc` for workspace detection. Verify EAS (Phase 8) still keys off `.npmrc` presence vs. needing the linker setting itself — under pnpm 11 the linker is in `pnpm-workspace.yaml`, so if EAS expected `node-linker` *inside* `.npmrc` that workaround may need revisiting.
 
 ---
@@ -178,11 +184,12 @@ Under **pnpm 11** this same file is now also where the pnpm *settings* live: `no
 {
   "name": "platform",
   "private": true,
-  "packageManager": "pnpm@11.6.0",
+  "packageManager": "pnpm@11.9.0",
   "engines": {
     "node": ">=22.13",
     "pnpm": ">=11"
   },
+  "prettier": "@platform/config/prettier",
   "scripts": {
     "prepare": "lefthook install",
     "bootstrap": "node scripts/bootstrap.mjs",
@@ -191,11 +198,11 @@ Under **pnpm 11** this same file is now also where the pnpm *settings* live: `no
     "typecheck": "turbo run typecheck",
     "test": "turbo run test",
     "build": "turbo run build",
-    "format": "prettier --write \"**/*.{ts,tsx,js,jsx,json,md,yml,yaml}\"",
-    "format:check": "prettier --check \"**/*.{ts,tsx,js,jsx,json,md,yml,yaml}\""
+    "format": "prettier --write \"**/*.{ts,tsx,js,jsx,mjs,cjs,json,md,yml,yaml}\"",
+    "format:check": "prettier --check \"**/*.{ts,tsx,js,jsx,mjs,cjs,json,md,yml,yaml}\""
   },
   "devDependencies": {
-    "turbo": "2.9.0",
+    "turbo": "2.9.18",
     "prettier": "^3.3.0",
     "lefthook": "^1.7.0",
     "typescript": "^5.6.0",
@@ -212,11 +219,12 @@ pnpm install            # installs devDeps, links @platform/config, runs `prepar
 
 **Why.**
 - `"prepare": "lefthook install"` — PHILOSOPHY Phase 1 explicitly says "hooks install via `pnpm prepare`". pnpm runs `prepare` automatically after `pnpm install`, so cloning + installing is the only step needed to get hooks.
-- `"packageManager": "pnpm@11.6.0"` — PHILOSOPHY "Workflows" calls out the `packageManager` field as the **eas-cli workspace detection workaround**; it also lets corepack/CI pick the right pnpm. Corepack expects a full exact semver, so set it to the exact pnpm version the lockfile resolves (the `11.6.0` shown is the current pnpm 11 patch as of June 2026 — replace with the lockfile's actual patch). Keeping this aligned with `mise.toml` matters MORE under pnpm 11, which fails a CI install when the lockfile was written by a newer pnpm major.
+- `"packageManager": "pnpm@11.9.0"` — PHILOSOPHY "Workflows" calls out the `packageManager` field as the **eas-cli workspace detection workaround**; it also lets corepack/CI pick the right pnpm. Corepack expects a full exact semver, so set it to the exact pnpm version the lockfile resolves (the `11.9.0` shown is what mise resolved on 2026-07-05 — replace with the lockfile's actual patch). Keeping this aligned with `mise.toml` matters MORE under pnpm 11, which fails a CI install when the lockfile was written by a newer pnpm major.
+- `"prettier": "@platform/config/prettier"` — the ROOT workspace must consume the shared Prettier config. The lefthook format jobs run from the repo root; without this key they silently format with Prettier DEFAULTS (width 80, no tailwind class sorting) even though `@platform/config/prettier` exists. Verify with `pnpm prettier --find-config-path package.json`.
 - `scripts: new-product, bootstrap` and `devDeps: turbo, prettier, lefthook` come verbatim from the Directory-tree annotation for `package.json`. `bootstrap` = "mise → install → supabase start" (PHILOSOPHY "Operational defaults"), implemented as `scripts/bootstrap.mjs` (created in Step 4b below) — a single, data-driven definition so there is no inline-vs-script drift to reconcile in a later phase. The `new-product` entry points at `scripts/new-product.mjs`, which is built in Phase 7 (the entry exists now; running it before Phase 7 errors with "file not found" — expected).
 - `@platform/config` as a `workspace:*` devDep makes the shared ESLint/Prettier/tsconfig presets resolvable from the root.
 
-⚠️ **OPEN / TO CONFIRM:** Exact dep versions. PHILOSOPHY.md pins **Turborepo 2.9** (so `turbo` is set to `2.9.0` — confirm the exact 2.9.x patch at install time; the 2.9.x line is live as of June 2026). Prettier/lefthook/typescript patch versions are not pinned in PHILOSOPHY; the `^` ranges above are reasonable defaults — replace with whatever the lockfile resolves and pin if stricter reproducibility is wanted. `"name": "platform"` is the root monorepo name; note PHILOSOPHY's naming convention warns the **monorepo name never drives app/infra ids** (those come from product names) — so this name is cosmetic only, independent of the git repo name.
+⚠️ **OPEN / TO CONFIRM:** Exact dep versions. PHILOSOPHY.md pins **Turborepo 2.9** (so `turbo` is pinned to the newest 2.9.x — `2.9.18` as of 2026-07-05; note turbo's latest major is already 2.10.x, deliberately NOT taken while PHILOSOPHY locks 2.9). Prettier/lefthook/typescript patch versions are not pinned in PHILOSOPHY; the `^` ranges above are reasonable defaults — replace with whatever the lockfile resolves and pin if stricter reproducibility is wanted. Drift snapshot from the 2026-07-05 run for the next `/update` to re-evaluate deliberately: `lefthook` has a 2.x major (range `^1.7.0` resolved 1.13.6), `typescript` has a 6.x major (range `^5.6.0` kept), `prettier` resolved 3.9.x; mise resolved node 24.18.0 · pnpm 11.9.0 · python 3.13.14 · uv 0.11.26. `"name": "platform"` is the root monorepo name; note PHILOSOPHY's naming convention warns the **monorepo name never drives app/infra ids** (those come from product names) — so this name is cosmetic only, independent of the git repo name.
 
 ---
 
@@ -393,10 +401,13 @@ This is the one real workspace created in Phase 1. It bundles ESLint flat config
   "exports": {
     "./eslint": "./eslint.config.js",
     "./prettier": "./prettier.json",
-    "./tailwind-preset": "./tailwind-preset.js",
+    "./tailwind-preset": "./tailwind-preset.cjs",
     "./tsconfig/base": "./tsconfig/base.json",
     "./tsconfig/expo": "./tsconfig/expo.json",
     "./tsconfig/node": "./tsconfig/node.json"
+  },
+  "scripts": {
+    "lint": "eslint ."
   },
   "devDependencies": {
     "eslint": "^9.10.0",
@@ -405,13 +416,14 @@ This is the one real workspace created in Phase 1. It bundles ESLint flat config
     "eslint-plugin-react": "^7.36.0",
     "eslint-plugin-react-hooks": "^5.0.0",
     "eslint-config-prettier": "^9.1.0",
+    "globals": "^15.9.0",
     "prettier": "^3.3.0",
     "prettier-plugin-tailwindcss": "^0.6.0"
   }
 }
 ```
 
-**Why.** PHILOSOPHY Directory tree: `packages/config` = "`@platform/config`: eslint flat config, prettier.json, tailwind-preset.js (design tokens), tsconfig/{base,expo,node}.json". The `exports` subpaths let consumers write `@platform/config/eslint`, `@platform/config/tailwind-preset`, `@platform/config/tsconfig/expo`, etc. — and PHILOSOPHY's `tailwind.config.js` note explicitly references `@platform/config/tailwind-preset`. `"type": "module"` so the flat config and preset are ESM.
+**Why.** PHILOSOPHY Directory tree: `packages/config` = "`@platform/config`: eslint flat config, prettier.json, tailwind-preset.cjs (design tokens), tsconfig/{base,expo,node}.json". The `exports` subpaths let consumers write `@platform/config/eslint`, `@platform/config/tailwind-preset`, `@platform/config/tsconfig/expo`, etc. — and PHILOSOPHY's `tailwind.config.js` note explicitly references `@platform/config/tailwind-preset` (the subpath is extensionless, so the `.cjs` file behind it is an implementation detail consumers never see). `"type": "module"` so the flat config is ESM — which is exactly why the tailwind preset must be a `.cjs` file (Step 7d). The `"lint": "eslint ."` script makes `turbo run lint` do real work in this package from day one (every non-generated workspace in the repo lints by convention — omitting the script here means turbo silently skips the package). `globals` supplies Node/CommonJS runtime globals to the flat config's node-context block (Step 7b).
 
 #### Step 7b — `packages/config/eslint.config.js` (ESLint flat config)
 
@@ -427,6 +439,7 @@ import tseslint from "typescript-eslint";
 import react from "eslint-plugin-react";
 import reactHooks from "eslint-plugin-react-hooks";
 import prettier from "eslint-config-prettier";
+import globals from "globals";
 
 export default tseslint.config(
   // Ignore generated + build artifacts everywhere.
@@ -436,6 +449,10 @@ export default tseslint.config(
       "**/.expo/**",
       "**/node_modules/**",
       "**/storybook-static/**",
+      // Desktop (Phase 5) artifacts: compiled main/preload, the copied SPA bundle, packed output.
+      "**/build/**",
+      "**/renderer/**",
+      "**/release/**",
       // Generated hey-api client is committed but never linted (PHILOSOPHY: never-edit-generated-client).
       "products/*/api-client/src/**",
     ],
@@ -458,12 +475,40 @@ export default tseslint.config(
       ],
     },
   },
+  // Node-context files: repo scripts (*.mjs/*.cjs, scripts/**) and CommonJS tool configs
+  // (tailwind.config.js, postcss.config.js, …). Without this block they fail no-undef on
+  // `console`/`module`/`require`, and the CJS tool configs trip no-require-imports.
+  {
+    files: ["**/*.{mjs,cjs}", "scripts/**", "**/*.config.js"],
+    languageOptions: {
+      globals: { ...globals.node, ...globals.commonjs },
+    },
+    rules: {
+      "@typescript-eslint/no-require-imports": "off",
+    },
+  },
   // Must be LAST: turns off rules that conflict with Prettier formatting.
   prettier,
 );
 ```
 
-**Why.** PHILOSOPHY "Quality": "ESLint **flat config** + Prettier". Flat config (`eslint.config.js`, ESLint 9) is the locked style. Ignoring `products/*/api-client/src/**` enforces PHILOSOPHY's "never-edit-generated-client" invariant. `eslint-config-prettier` last avoids ESLint/Prettier fights since Prettier owns formatting.
+**Why.** PHILOSOPHY "Quality": "ESLint **flat config** + Prettier". Flat config (`eslint.config.js`, ESLint 9) is the locked style. Ignoring `products/*/api-client/src/**` enforces PHILOSOPHY's "never-edit-generated-client" invariant; the `**/build|renderer|release/**` ignores keep the Phase 5 desktop workspace lintable with a plain `eslint .` (its compiled main, copied SPA bundle, and packed output would otherwise be linted). The node-context block exists because the repo's own scripts (`bootstrap.mjs`, `new-product.mjs`, …) and the CJS tool configs Phase 2 adds (`tailwind.config.js`, `postcss.config.js`) are covered by the pre-commit hook globs — without runtime globals they fail `no-undef` on `console`/`module`. `eslint-config-prettier` last avoids ESLint/Prettier fights since Prettier owns formatting.
+
+#### Step 7b-bis — root `eslint.config.mjs` (the root workspace is a consumer too)
+
+**Files:** `eslint.config.mjs` (repo root)
+
+**Contents:**
+
+```js
+// Root ESLint config — ESLint 9 resolves its flat config from the CWD, and the lefthook
+// pre-commit job runs `pnpm eslint {staged_files}` from the repo root. Without this file,
+// every commit containing a .ts/.js file fails with "could not find eslint.config file".
+// Same consumption pattern every downstream workspace uses.
+export { default } from "@platform/config/eslint";
+```
+
+**Why.** ESLint 9 flat config is resolved **from the cwd**, not per-file — and the repo-root cwd is exactly where the lefthook jobs run. The root file is `.mjs` (not `.js`) because the root `package.json` is not `"type": "module"`.
 
 #### Step 7c — `packages/config/prettier.json`
 
@@ -482,18 +527,18 @@ export default tseslint.config(
 }
 ```
 
-**Why.** PHILOSOPHY "Quality": Prettier. `prettier-plugin-tailwindcss` sorts `className` utility lists — relevant because PHILOSOPHY's design system uses NativeWind/Tailwind `className` everywhere. Downstream `.prettierrc` files extend this via `"@platform/config/prettier"`.
+**Why.** PHILOSOPHY "Quality": Prettier. `prettier-plugin-tailwindcss` sorts `className` utility lists — relevant because PHILOSOPHY's design system uses NativeWind/Tailwind `className` everywhere. **This config is inert until something consumes it** — the ROOT consumer is the `"prettier": "@platform/config/prettier"` key in the root `package.json` (Step 4); downstream workspaces may add their own `.prettierrc` pointing at `"@platform/config/prettier"` if they need overrides, but with the root key set they inherit it automatically. Verify wiring with `pnpm prettier --find-config-path package.json` — if it reports "can not find configure file", every hook format is silently running with Prettier defaults.
 
 ⚠️ **OPEN / TO CONFIRM:** Specific style knobs (printWidth 100, double quotes, etc.) aren't dictated by PHILOSOPHY — these are conventional defaults. Adjust to team taste; they only need to be consistent repo-wide.
 
-#### Step 7d — `packages/config/tailwind-preset.js` (semantic tokens → CSS vars)
+#### Step 7d — `packages/config/tailwind-preset.cjs` (semantic tokens → CSS vars)
 
-**Files:** `packages/config/tailwind-preset.js`
+**Files:** `packages/config/tailwind-preset.cjs`
 
 **Contents:**
 
 ```js
-// @platform/config — shared Tailwind/NativeWind PRESET.
+// @platform/config — shared Tailwind/NativeWind PRESET (.cjs: CommonJS by design, see note below).
 // PHILOSOPHY ruling #8 + "Theming wiring": the preset maps SEMANTIC color names to CSS VARIABLES.
 // Components consume semantic names ONLY (bg-primary, text-foreground) — never hex/brand values.
 // Each PRODUCT overrides the VARIABLE VALUES in its own theme.ts/global.css; component code is
@@ -552,7 +597,7 @@ module.exports = {
 };
 ```
 
-> **Module format note:** PHILOSOPHY's `tailwind.config.js` consumes this via `presets: ["@platform/config/tailwind-preset"]` and Tailwind configs are loaded by the Tailwind/NativeWind toolchain in CommonJS context. This file is authored as CommonJS (`module.exports`) even though the package is `"type": "module"`, hence the `.js` export maps to a CJS-shaped file. If Tailwind's loader rejects it under an ESM package, rename to `tailwind-preset.cjs` and update the `exports` subpath. ⚠️ **TO CONFIRM** against the NativeWind v4 + Tailwind toolchain in Phase 2.
+> **Module format note (RESOLVED — author as `.cjs` from the start):** PHILOSOPHY's `tailwind.config.js` consumes this via `presets: ["@platform/config/tailwind-preset"]` and Tailwind configs are loaded by the Tailwind/NativeWind toolchain in CommonJS context, so the file is CommonJS (`module.exports`) by design. It MUST be named `.cjs`, not `.js`: inside a `"type": "module"` package a `.js` file is parsed as ESM by both Node (`require()` refuses it) and ESLint (`'module' is not defined (no-undef)` on the very first pre-commit) — the breakage is immediate in Phase 1, not Phase-2-conditional. The `exports` subpath `./tailwind-preset` is extensionless, so `presets: ["@platform/config/tailwind-preset"]` references stay valid. (Confirmed 2026-07-05: the NativeWind v4 + Tailwind v3 loader resolves the `.cjs` export fine — still worth a glance during Phase 2's first `expo export`.)
 
 **Why.** This is the load-bearing piece of PHILOSOPHY ruling #8 and the "Theming wiring" gotcha: "the shared tailwind preset maps semantic color names to vars (`primary: "hsl(var(--primary))"`, …)". `packages/ui` has **no tailwind config of its own** (PHILOSOPHY gotcha) — it relies on this preset transitively through each product's `tailwind.config.js`. Defining names-not-values here is what makes "one component set, per-product brand, runtime dark mode" work across all four targets.
 
@@ -619,11 +664,13 @@ pnpm --filter @platform/config exec ls -R      # confirm files are present & res
 
 ---
 
-### Step 8 — `.gitignore` (ignore artifacts, KEEP per-env .env files)
+### Step 8 — `.gitignore` + `.prettierignore` (ignore artifacts, KEEP per-env .env files)
 
-**Files:** `.gitignore`
+**Files:** `.gitignore`, `.prettierignore`
 
-**Contents:**
+> ⚠️ **gitignore syntax trap:** inline comments are NOT a thing in gitignore — `renderer/   # comment` is ONE literal pattern that matches nothing. Every comment must sit on its own line. (This exact bug shipped once and lay masked until Phase 5 first created a `renderer/` dir, at which point ~200 copied files appeared to git and prettier.)
+
+**Contents — `.gitignore`:**
 
 ```gitignore
 # ---- JS / pnpm ----
@@ -631,11 +678,15 @@ node_modules/
 .pnpm-store/
 *.tsbuildinfo
 
+# ---- Turborepo ----
+.turbo/
+
 # ---- Build outputs ----
 dist/
 build/
 storybook-static/
-renderer/            # electron copies app/dist here at build time
+# electron copies app/dist into renderer/ at build time
+renderer/
 
 # ---- Expo / RN ----
 .expo/
@@ -670,6 +721,25 @@ release/
 # (Intentionally NOT ignored: .env.development, .env.staging, .env.production — committed.)
 ```
 
+**Contents — `.prettierignore`:**
+
+```gitignore
+# .prettierignore — COMMITTED GENERATED artifacts that must stay byte-exact.
+# Prettier 3 already respects .gitignore for untracked build outputs, so only committed
+# generated files (and CLI-managed state Prettier can see) need entries here.
+#
+# The pre-commit prettier hook otherwise reformats these at commit time, and any
+# regenerate-and-diff check (Phase 4's typegen drift gate: regen + `git diff --exit-code`)
+# then fails on formatting alone.
+pnpm-lock.yaml
+products/*/api/openapi.json
+products/*/api-client/src/
+# Supabase CLI runtime state: the CLI writes a NESTED products/*/supabase/.gitignore for
+# these, but Prettier 3 only reads the ROOT .gitignore/.prettierignore — so list them here.
+products/*/supabase/.temp/
+products/*/supabase/.branches/
+```
+
 **Commands:**
 
 ```bash
@@ -683,6 +753,8 @@ rm -f .env .env.local .env.development .env.staging .env.production
 Expected: `.env` and `.env.local` are reported ignored; the three per-env files are NOT.
 
 **Why.** PHILOSOPHY "Env/config" (and the Directory-tree annotation on `app/.env.*`): "gitignore allows these [`.env.development/.staging/.production`], still ignores `.env` + `.env.local`". This is a subtle, load-bearing rule — getting the negation wrong either leaks secrets (if `.env` is committed) or breaks the committed-per-env-config model (if the per-env files are ignored). The pattern above ignores only the bare/local/`.*.local` forms.
+
+The `.prettierignore` protects committed generated artifacts from the pre-commit format hook. Without it, `openapi.json` gets reformatted at commit time (json.dumps form → prettier form), and the Phase 4 contract check (regenerate + `git diff --exit-code`) fails with a ~1500-line pure-formatting diff on its first run; `pnpm-lock.yaml` also gets quote-churned by the hook's yml glob. Phase 3/4 generated outputs are prettier-exempt by design — their generators own the bytes.
 
 ---
 
@@ -703,27 +775,36 @@ pre-commit:
   parallel: true
   commands:
     prettier:
-      glob: "*.{ts,tsx,js,jsx,json,md,yml,yaml,css}"
+      # mjs/cjs included: the repo's own scripts (bootstrap.mjs, new-product.mjs) and the root
+      # eslint.config.mjs are .mjs — a glob without them lets those files skip formatting.
+      glob: "*.{ts,tsx,js,jsx,mjs,cjs,json,md,yml,yaml,css}"
       # {staged_files} = only what's staged; --no-error-on-unmatched-pattern so an all-.py
       # commit doesn't fail prettier.
       run: pnpm prettier --write --no-error-on-unmatched-pattern {staged_files}
       stage_fixed: true # re-stage files prettier reformatted
     eslint:
-      glob: "*.{ts,tsx,js,jsx}"
+      glob: "*.{ts,tsx,js,jsx,mjs,cjs}"
       # Lint only staged JS/TS; the @platform/config flat config ignores the generated client.
       run: pnpm eslint --fix --no-error-on-unmatched-pattern {staged_files}
       stage_fixed: true
     ruff-check:
       glob: "*.py"
       # Scoped to staged .py only. Each product api carries uv + ruff in its own venv (Phase 3);
-      # `uv run` resolves the right environment from the file's project. No-op until an api exists.
+      # `uv run --project` resolves the right environment. The project root is found by walking
+      # UP from the first staged file to the nearest pyproject.toml — works at any depth
+      # (`$(dirname {staged_files} | head -1)/..` does NOT: for files under src/<pkg>/ it points
+      # uv at src/). Still first-project-wins for multi-project commits. No-op until an api exists.
       run: |
-        uv run --project "$(dirname {staged_files} | head -1)/.." ruff check --fix {staged_files}
+        first=$(echo {staged_files} | cut -d' ' -f1); d=$(dirname "$first")
+        while [ "$d" != "." ] && [ ! -f "$d/pyproject.toml" ]; do d=$(dirname "$d"); done
+        uv run --project "$d" ruff check --fix {staged_files}
       stage_fixed: true
     ruff-format:
       glob: "*.py"
       run: |
-        uv run --project "$(dirname {staged_files} | head -1)/.." ruff format {staged_files}
+        first=$(echo {staged_files} | cut -d' ' -f1); d=$(dirname "$first")
+        while [ "$d" != "." ] && [ ! -f "$d/pyproject.toml" ]; do d=$(dirname "$d"); done
+        uv run --project "$d" ruff format {staged_files}
       stage_fixed: true
 
 # pre-push: the AFFECTED gate (PHILOSOPHY: "turbo run typecheck test build --affected" +, for
@@ -743,7 +824,8 @@ pre-push:
 
 ```bash
 pnpm install            # `prepare` → `lefthook install` writes .git/hooks shims
-lefthook version        # sanity check binary is on PATH
+pnpm lefthook version   # sanity check (lefthook is a workspace devDep — `pnpm lefthook …` works
+                        # everywhere; the bare binary is not on PATH in non-interactive shells)
 ls -la .git/hooks/      # expect lefthook-managed pre-commit & pre-push shims
 ```
 
@@ -754,7 +836,7 @@ ls -la .git/hooks/      # expect lefthook-managed pre-commit & pre-push shims
 `stage_fixed: true` makes `--write`/`--fix` reformats part of the commit. The hooks install via `pnpm prepare` per PHILOSOPHY Phase 1 — no manual `lefthook install` step.
 
 ⚠️ **OPEN / TO CONFIRM:**
-- PHILOSOPHY says Ruff is "scoped to the touched product's api" but doesn't give the exact lefthook invocation; the `uv run --project …` form above is one plausible scoping. In Phase 1 there is **no api**, so the `.py` commands never match and are no-ops — finalize the exact `--project` resolution in Phase 3 when `products/_template/api` exists (the `$(dirname …)` heuristic is fragile across multiple staged files in different products).
+- **RESOLVED (ruff scoping):** the walk-up-to-nearest-`pyproject.toml` derivation above is the verified form — the earlier `$(dirname {staged_files} | head -1)/..` heuristic failed the first real `.py` commit (for staged files under `src/<pkg>/` it pointed uv at `src/`). In Phase 1 there is **no api**, so the `.py` commands never match and are no-ops. Remaining limitation: first-project-wins when one commit touches `.py` files in multiple products.
 - PHILOSOPHY says pre-push includes "(for affected APIs) pyright strict + pytest". Two faithful ways to honor this: (a) let turbo's per-api `typecheck`/`test` tasks (defined in the api `package.json` as `uv run pyright` / `uv run pytest`) be picked up by `turbo run typecheck test build --affected` — preferred, keeps it cached + affected-scoped; or (b) add explicit lefthook commands. This guide assumes (a). Confirm in Phase 3.
 - Lefthook reads `lefthook.yml` at repo root (PHILOSOPHY Directory tree). Version `^1.7.0` chosen as a recent stable; pin to whatever the lockfile resolves.
 
@@ -768,11 +850,14 @@ ls -la .git/hooks/      # expect lefthook-managed pre-commit & pre-push shims
 - **Python `inputs` globs in `turbo.json` are mandatory** (PHILOSOPHY gotcha): `openapi` must declare `inputs: ["src/**/*.py","pyproject.toml","uv.lock"]` or turbo's content hash ignores `.py` changes and serves a stale cached `openapi.json`. This bites in Phase 4 (typegen drift) if forgotten now.
 - **Affected-scoping needs a git base.** `turbo run … --affected` compares against a base ref (default the merge-base with the default branch). On a brand-new branch with no upstream, turbo may consider everything affected — fine for the Phase 1 no-op, but confirm CI sets `TURBO_SCM_BASE`/fetch depth in Phase 8.
 - **Don't encode product-specific turbo edges in the root `turbo.json`.** The `api-client#build` (`^openapi`, `^build`) and `desktop#build` (`^export:web`, copy `dist`→`renderer`) edges are **package-level** turbo.json files added with their packages (Phases 4/5). Putting them in the root file would break the generic, generator-stampable shape.
-- **`packages/ui` has no tailwind config** (PHILOSOPHY gotcha) — the semantic-token mapping lives ONLY in `@platform/config/tailwind-preset` and is pulled in by each product's `tailwind.config.js`. Don't duplicate it.
+- **`packages/ui` has no tailwind config *for app consumption*** (PHILOSOPHY gotcha) — the semantic-token mapping lives ONLY in `@platform/config/tailwind-preset` and is pulled in by each product's `tailwind.config.js`. Don't duplicate it. (Phase 2's Storybook workbench legitimately adds a workbench-only `tailwind.config.js` inside `packages/ui` for its own PostCSS pipeline — that file is never consumed by app builds.)
 - **The preset declares token NAMES, not VALUES.** Putting concrete colors in the preset would break per-product branding (PHILOSOPHY ruling #8). Values land in `packages/ui/src/lib/theme.ts` and each product's `theme.ts`/`global.css` (Phase 2).
 - **`.gitignore` env negation is easy to get backwards.** Only `.env`, `.env.local`, `.env.*.local` are ignored. The three committed per-env files must stay tracked (PHILOSOPHY "Env/config").
 - **`preferFrozenLockfile: true`** (in `pnpm-workspace.yaml` under pnpm 11, not `.npmrc`) means a `package.json` dep change without a lockfile update will fail install in CI — run `pnpm install` locally to refresh the lockfile before pushing. Note pnpm 11 also fails a CI install when the lockfile was written by a newer pnpm major, so keep the pnpm major aligned across dev/CI.
 - **Generated client is never linted/edited.** The ESLint ignore for `products/*/api-client/src/**` enforces PHILOSOPHY's "never-edit-generated-client" invariant; don't remove it.
+- **The root workspace is a preset CONSUMER, not just the preset host.** Both root wiring files are load-bearing: `eslint.config.mjs` (ESLint 9 resolves flat config from the cwd — the lefthook jobs run at repo root) and the root `package.json` `"prettier"` key (otherwise hooks format with Prettier defaults, silently). Missing either produces failures/drift that only surface commits or phases later.
+- **Committed generated artifacts must be prettier-exempt.** Anything a generator owns byte-for-byte (`openapi.json`, the hey-api client, `pnpm-lock.yaml`) belongs in `.prettierignore`, or regenerate-and-diff checks (Phase 4) fail on formatting alone.
+- **Non-interactive installs need `CI=1`.** pnpm 11 can prompt (e.g. modules-dir purge after an `allowBuilds` edit); agent/CI shells without a TTY hang indefinitely. `CI=1 pnpm install` in any non-interactive context.
 
 ---
 
@@ -799,20 +884,23 @@ test -f pnpm-lock.yaml && echo "single lockfile OK"
 ```
 Expected: install succeeds, one `pnpm-lock.yaml`, hook shims exist.
 
-**DoD 3 — turbo lint no-op:**
+**DoD 3 — turbo lint runs clean:**
 ```bash
 pnpm turbo run lint ; echo "exit=$?"
 ```
-Expected: `exit=0`. Output reads as "no tasks to run" / all cache-hit (only `packages/config` exists and has no lint task wired yet — adding a `lint` script to it later turns this into a real lint run).
+Expected: `exit=0`, with exactly one task run (`@platform/config#lint`) — the product globs are inert until Phase 2+.
 
-**DoD 4 — `@platform/config` resolves:**
+**DoD 4 — `@platform/config` resolves (and the ROOT consumes it):**
 ```bash
 pnpm --filter @platform/config exec node -e "console.log('resolved @platform/config')"
 ls packages/config/eslint.config.js packages/config/prettier.json \
-   packages/config/tailwind-preset.js \
+   packages/config/tailwind-preset.cjs \
    packages/config/tsconfig/base.json packages/config/tsconfig/expo.json packages/config/tsconfig/node.json
+ls eslint.config.mjs                                # root flat-config re-export exists
+pnpm eslint --print-config package.json > /dev/null && echo "root eslint config OK"
+pnpm prettier --find-config-path package.json        # must resolve (not "can not find configure file")
 ```
-Expected: all six files listed, no errors.
+Expected: all six package files + the root `eslint.config.mjs` listed; ESLint and Prettier both resolve a config from the repo root.
 
 **DoD 5 — strict TS base:**
 ```bash
@@ -842,8 +930,9 @@ Expected: the staged file is auto-formatted (re-staged) and the commit reflects 
 
 **DoD 8 — pre-push fires:**
 ```bash
-# Dry run the hook without a remote:
-lefthook run pre-push ; echo "exit=$?"
+# Dry run the hook without a remote (pnpm-prefixed: works everywhere, incl. non-interactive
+# shells where the lefthook workspace devDep is not on bare PATH):
+pnpm lefthook run pre-push ; echo "exit=$?"
 ```
 Expected: it invokes `pnpm turbo run typecheck test build --affected`, which is a clean no-op while no products exist; `exit=0`.
 
@@ -863,8 +952,8 @@ Suggested boundaries on the `phase-1-root-tooling` feature branch (PHILOSOPHY: "
 1. `chore: pin toolchain with mise.toml` — Step 1.
 2. `chore: pnpm workspace + .npmrc (hoisted linker)` — Steps 2-3.
 3. `chore: root package.json + scripts/bootstrap.mjs, turbo.json, tsconfig.base.json` — Steps 4-6 (incl. Step 4b bootstrap).
-4. `feat(config): add @platform/config shared presets` — Step 7 (eslint flat, prettier, tailwind preset, tsconfig presets).
-5. `chore: .gitignore (ignore artifacts, keep per-env .env)` — Step 8.
+4. `feat(config): add @platform/config shared presets + root consumers` — Step 7 (eslint flat, prettier, tailwind preset `.cjs`, tsconfig presets, root `eslint.config.mjs`).
+5. `chore: .gitignore + .prettierignore (ignore artifacts, keep per-env .env)` — Step 8.
 6. `chore: lefthook hooks (staged pre-commit, --affected pre-push)` — Step 9.
 
 A single squashed `chore: phase 1 root tooling` is also acceptable. **Do not** `git add/commit/push` as part of executing this guide unless the caller explicitly asks — the parent handles version control.
@@ -874,10 +963,10 @@ A single squashed `chore: phase 1 root tooling` is also acceptable. **Do not** `
 ## Open questions / deferred
 
 - **uv exact pin** — PHILOSOPHY says "uv" / mise uses `latest`; pin an exact version once Phase 3's api Dockerfile depends on it. (⚠️ TO CONFIRM)
-- **Ruff lefthook scoping** — exact `uv run --project …` invocation for "scoped to the touched product's api" is finalized in Phase 3 when an api exists; the `$(dirname …)` heuristic here is provisional. (⚠️ TO CONFIRM)
+- **Ruff lefthook scoping** — ✅ RESOLVED: the walk-up-to-nearest-`pyproject.toml` derivation in Step 9 is the verified form (run 2026-07-05). Remaining edge: first-project-wins for multi-product `.py` commits.
 - **pre-push pyright/pytest path** — assumed to flow through turbo's per-api `typecheck`/`test` tasks (cached + affected). Confirm vs. explicit lefthook commands in Phase 3. (⚠️ TO CONFIRM)
-- **Exact dep versions** — only Turborepo (2.9) and the Node/pnpm/Python pins are PHILOSOPHY-locked; prettier/lefthook/eslint/typescript ranges are conventional defaults — replace with lockfile-resolved pins. (⚠️ TO CONFIRM)
-- **tailwind preset module format** — CJS-shaped `.js` under an ESM package may need a `.cjs` rename depending on the NativeWind v4 Tailwind loader; verify in Phase 2. (⚠️ TO CONFIRM)
-- **`packages/config` `lint` task** — Phase 1 has no lintable source there, so `turbo run lint` is a true no-op. Wire a real `lint` script into `@platform/config` (and into each package's `package.json`) so the turbo `lint` task does meaningful work from Phase 2 onward. (⚠️ TO CONFIRM)
+- **Exact dep versions** — only Turborepo (2.9) and the Node/pnpm/Python pins are PHILOSOPHY-locked; prettier/lefthook/eslint/typescript ranges are conventional defaults — replace with lockfile-resolved pins. See the Step 4 drift snapshot (2026-07-05) for the majors deliberately not taken. (⚠️ TO CONFIRM at each `/update`)
+- **tailwind preset module format** — ✅ RESOLVED: authored as `tailwind-preset.cjs` from the start (Step 7d); a CJS-shaped `.js` in a `"type": "module"` package breaks Node AND ESLint immediately. NativeWind v4 + Tailwind v3 loader confirmed resolving the `.cjs` export (run 2026-07-05).
+- **`packages/config` `lint` task** — ✅ RESOLVED: the `"lint": "eslint ."` script ships in the Step 7a skeleton, so `turbo run lint` does real work in this package from Phase 1.
 - **CI affected base ref** — `--affected` base/SCM settings for GitHub Actions are a Phase 8 concern (`ci.yml`), not Phase 1. (Deferred per PHILOSOPHY phasing.)
 - **ADR vs ARCHITECTURE.md** — decision-record format is explicitly **deferred** in PHILOSOPHY's Decision Sheet; not a Phase 1 deliverable.

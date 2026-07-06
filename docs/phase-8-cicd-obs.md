@@ -93,7 +93,9 @@ from an earlier phase the step says so.
       exists (local only).
 - [ ] **Workflows:** `ci.yml`, `deploy-api.yml`, `eas-build.yml`, `eas-update.yml`,
       `e2e-nightly.yml`, `electron-release.yml` all present in `.github/workflows/`, valid
-      YAML, using clearly-marked placeholders.
+      YAML (actionlint-clean), using clearly-marked placeholders. **Plus the per-product
+      `eas.json` (channels EXACTLY `staging`/`production`) and `vercel.json` (SPA rewrite)**
+      — in PHILOSOPHY's tree but created by no earlier phase (step f).
 - [ ] **Docs/agent surface:** root `CLAUDE.md` + `README.md`; `packages/ui/CLAUDE.md` +
       `FIGMA.md`; product `CLAUDE.md` + `README.md` (+ nested api CLAUDE.md recipe);
       `.claude/commands/` at all three levels with the documented command inventories.
@@ -141,7 +143,11 @@ def configure_logging(*, level: str = "INFO") -> None:
             structlog.processors.dict_tracebacks,
             structlog.processors.JSONRenderer(),        # JSON logs
         ],
-        wrapper_class=structlog.make_filtering_bound_logger(logging.getLevelName(level)),
+        # getLevelNamesMapping (3.11+): the str->int direction of logging.getLevelName is
+        # deprecated and fails pyright strict.
+        wrapper_class=structlog.make_filtering_bound_logger(
+            logging.getLevelNamesMapping()[level.upper()]
+        ),
         logger_factory=structlog.PrintLoggerFactory(),
         cache_logger_on_first_use=True,
     )
@@ -224,10 +230,23 @@ app = FastAPI(...)
 app.add_middleware(RequestIdMiddleware)
 ```
 
-`packages/core/src/api.ts` (extend the hey-api client wrapper — inject id + auth header):
+`packages/core/src/api.ts` (extend the hey-api client wrapper — inject id + auth header).
+**The client is INJECTED, never imported by name:** `packages/core` is shared and never
+stamped, so `import { client } from "@platform/<product>-api-client"` is impossible there —
+the `<product>` token can't be rewritten in a shared package, and a hard import of the
+template's client ships a latent cross-product bug (a stamped product's `_layout.tsx`
+silently configures the TEMPLATE's client singleton while its own hooks use its own,
+unconfigured client — this actually shipped in Phases 4–7 before the audit caught it):
 ```ts
-import { client } from "@platform/<product>-api-client"; // hey-api client-fetch instance
 import { captureRequestId } from "./sentry";
+
+/** Structural shape of the generated hey-api client — keeps core product-agnostic. */
+export type GeneratedApiClient = {
+  setConfig: (config: { baseUrl?: string }) => unknown;
+  interceptors: {
+    request: { use: (fn: (request: Request) => Request | Promise<Request>) => unknown };
+  };
+};
 
 // crypto.randomUUID exists on web + Hermes (RN 0.85). Fallback kept for safety.
 function newRequestId(): string {
@@ -236,7 +255,15 @@ function newRequestId(): string {
     : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
-export function configureApiClient(opts: { baseUrl: string; getToken: () => string | null }) {
+/**
+ * Each product calls this from ITS OWN app/_layout.tsx with ITS OWN generated client:
+ *   import { client } from "@platform/template-api-client";
+ *   configureApiClient(client, { baseUrl: env.apiUrl, getToken: getAccessToken });
+ */
+export function configureApiClient(
+  client: GeneratedApiClient,
+  opts: { baseUrl: string; getToken: () => string | null },
+) {
   client.setConfig({ baseUrl: opts.baseUrl });
   client.interceptors.request.use((request) => {
     const rid = newRequestId();
@@ -255,10 +282,12 @@ import * as Sentry from "@sentry/react-native";
 import { env } from "./env";
 
 export function initSentry() {
-  if (!env.EXPO_PUBLIC_SENTRY_DSN) return; // no-op without DSN
+  // Field names follow env.ts's committed camelCase accessor shape (env.apiUrl, ...) —
+  // add `sentryDsn` / `appEnv` there reading EXPO_PUBLIC_SENTRY_DSN / EXPO_PUBLIC_ENV.
+  if (!env.sentryDsn) return; // no-op without DSN
   Sentry.init({
-    dsn: env.EXPO_PUBLIC_SENTRY_DSN,
-    environment: env.EXPO_PUBLIC_ENV,      // staging | production
+    dsn: env.sentryDsn,
+    environment: env.appEnv,               // staging | production
     tracesSampleRate: 0.1,
   });
 }
@@ -312,7 +341,11 @@ module.exports = withNativeWind(config, { input: "./global.css" });
 
 **Commands**
 ```bash
+# structlog + sentry-sdk[fastapi] are ALREADY Phase 3 deps (PHILOSOPHY's dep list) — the
+# uv add is a no-op kept for idempotence:
 cd products/_template/api && uv add structlog "sentry-sdk[fastapi]" && cd -
+# BEFORE this install: add `"@sentry/cli": true` to pnpm-workspace.yaml allowBuilds —
+# its postinstall downloads the sentry-cli binary (pnpm 11 blocks it otherwise).
 pnpm --filter @platform/core add @sentry/react-native
 # the Expo config plugin + Metro helper ship inside the same package — no extra install.
 turbo run typecheck --filter=*template-api --filter=@platform/core
@@ -333,34 +366,56 @@ the request.
 
 ### (b) Push loop — register → /v1/push-tokens → send_push()
 
+> **RECONCILIATION (2026-07-05 run): most of the server side ALREADY SHIPPED IN PHASE 3** —
+> the model (`models/push_token.py`, per **user+device** with `uq_push_user_device`, per the
+> gospel), `schemas/push.py`, `PushService` (`services/push_service.py`), `routers/push.py`,
+> and the RLS deny-all migration. **Phase 3's shapes are authoritative** — where the
+> skeletons below differ (file names, a per-user+token constraint, DTO field names), keep
+> Phase 3's. Phase 8's REAL additions: `test_push.py`, the core registration helper, the app
+> wiring, and the `tasks.py` alignment (step d).
+
 **Files**
 - `packages/core/src/notifications.ts` *(extend — created stub in Phase 2/6 tree)*
-- `products/_template/api/src/template_api/models/push_token.py` *(new)*
-- `products/_template/api/src/template_api/schemas/push.py` *(new — DTOs)*
-- `products/_template/api/src/template_api/services/push.py` *(new — `PushService`)*
-- `products/_template/api/src/template_api/routers/push.py` *(new — `/v1/push-tokens`)*
-- `products/_template/api/alembic/versions/<rev>_push_tokens.py` *(new migration — RLS deny-all)*
+- `products/_template/api/src/template_api/models/push_token.py` *(verify — Phase 3)*
+- `products/_template/api/src/template_api/schemas/push.py` *(verify — Phase 3)*
+- `products/_template/api/src/template_api/services/push_service.py` *(verify — Phase 3)*
+- `products/_template/api/src/template_api/routers/push.py` *(verify — Phase 3)*
+- `products/_template/api/alembic/versions/0001_initial.py` *(verify — Phase 3's initial
+  migration already creates `push_token` with RLS deny-all)*
 - `products/_template/api/tests/test_push.py` *(new)*
 
 **Contents**
 
-`core/notifications.ts`:
+`core/notifications.ts` — same injection rule as `api.ts`: shared core can NEVER import a
+product's generated SDK by name, so the product passes its generated call in:
 ```ts
 import * as Notifications from "expo-notifications";
 import * as Device from "expo-device";
-import { postV1PushTokens } from "@platform/<product>-api-client"; // generated SDK fn
 
-export async function registerForPushNotifications(): Promise<string | null> {
+/** The product's generated SDK call for POST /v1/push-tokens, injected at the call site:
+ *    import { registerToken } from "@platform/template-api-client";
+ *    registerForPushNotifications((body) => registerToken({ body }));
+ */
+export type RegisterPushToken = (body: {
+  device_id: string;
+  expo_token: string;
+}) => Promise<unknown>;
+
+export async function registerForPushNotifications(
+  post: RegisterPushToken,
+): Promise<string | null> {
   if (!Device.isDevice) return null; // simulators/Expo Go cannot receive a token
   const { status: existing } = await Notifications.getPermissionsAsync();
   let status = existing;
   if (existing !== "granted") status = (await Notifications.requestPermissionsAsync()).status;
   if (status !== "granted") return null;
   const { data: token } = await Notifications.getExpoPushTokenAsync();
-  await postV1PushTokens({ body: { token, platform: Device.osName ?? "unknown" } });
+  await post({ device_id: Device.osInternalBuildId ?? "unknown", expo_token: token });
   return token;
 }
 ```
+> Body field names follow Phase 3's `PushTokenCreate` DTO (`device_id` + `expo_token`, the
+> per-user+device shape) — not an ad-hoc `{token, platform}` pair.
 
 `api/.../models/push_token.py` (SQLModel, UUIDv7 base from Phase 3):
 ```python
@@ -471,18 +526,19 @@ async def test_send_push_mocks_expo(session, user):
 
 **Commands**
 ```bash
-cd products/_template/api && uv add httpx && uv run alembic revision --autogenerate -m "push_tokens" && cd -
-pnpm --filter @platform/<product>-app add expo-notifications expo-device
-# After editing the new migration to add RLS deny-all on push_token:
-cd products/_template/api && uv run alembic upgrade head && uv run pytest tests/test_push.py && cd -
-turbo run openapi --filter=*template-api   # regenerate openapi.json (push endpoint now in contract)
+# httpx is already a Phase 3 runtime dep; the push_token table + RLS deny-all already exist
+# in Phase 3's initial migration — NO new migration is needed here.
+pnpm --filter @platform/template-app exec expo install expo-notifications expo-device
+cd products/_template/api && uv run pytest tests/test_push.py && cd -
+turbo run openapi --filter=*template-api   # idempotent — the push endpoint is already in the contract
 ```
 
 **Why** — PHILOSOPHY.md: "Push notifications: full loop templated — token registration in the app
 (expo-notifications), `/v1/push-tokens` endpoint + table (per user+device), `send_push()`
-service calling Expo's Push API via httpx." The new migration must include **RLS deny-all**
-on `push_token` (DB convention: every table RLS deny-all; the API's privileged role bypasses
-it). Expo Go cannot receive a token — registration only works in a dev build (gotcha below).
+service calling Expo's Push API via httpx." Phase 3's initial migration already applies
+**RLS deny-all** on `push_token` (DB convention: every table RLS deny-all; the API's
+privileged role bypasses it). Expo Go cannot receive a token — registration only works in a
+dev build (gotcha below).
 
 ---
 
@@ -527,13 +583,12 @@ async def broadcast_invalidate(resource: str, *, http: httpx.AsyncClient | None 
         if http is None:
             await client.aclose()
 ```
-> ⚠️ REVIEW: the broadcast-only architecture and the client side
-> (`supabase.channel(...).on("broadcast", {event}, cb).subscribe()`) are confirmed current
-> supabase-js. The **server-side HTTP broadcast path** `POST /realtime/v1/api/broadcast` with
-> `apikey` + service-role bearer matches Supabase's documented "send broadcast from the
-> server" REST approach, but Supabase has iterated on Realtime auth (RLS on
-> `realtime.messages`); verify the exact path + whether the service-role key alone suffices
-> against the live project when it exists. The architecture does not change either way.
+> ✅ RESOLVED (local, 2026-07-05): the server-side path is CONFIRMED live —
+> `POST {SUPABASE_URL}/realtime/v1/api/broadcast` with `apikey` + service-role bearer returns
+> **202 Accepted** against the local stack (CLI current as of 2026-07), and the E2E proves
+> end-to-end delivery (a second client repaints via broadcast → invalidate → refetch).
+> Re-verify once a HOSTED project exists (Supabase has iterated on Realtime auth / RLS on
+> `realtime.messages`); the architecture does not change either way.
 
 `api/.../services/items.py` (extend the create/update/delete paths — broadcast after commit):
 ```python
@@ -553,22 +608,37 @@ class ItemService(BaseService):
 > broadcast failure should fail the mutation — default here is "log + swallow" so a Realtime
 > outage never breaks writes; confirm per product.
 
-`packages/core/src/realtime.ts` (the shipped subscribe-and-invalidate helper):
+`packages/core/src/realtime.ts` (the shipped subscribe-and-invalidate helper).
+**hey-api query keys are OBJECT-shaped** — `[{ _id: "listItems", baseUrl, ... }]` — so a bare
+`invalidateQueries({ queryKey: ["items"] })` NEVER matches a generated query. The helper
+therefore takes a `keys` map (resource → generated key-fn results); TanStack's partial deep
+matching then also catches the `_infinite` variant. Unmapped resources still fall back to
+`[resource]` for hand-written queries:
 ```ts
-import type { QueryClient } from "@tanstack/react-query";
+import type { QueryClient, QueryKey } from "@tanstack/react-query";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 // Wires channel `invalidate` events → TanStack invalidation. No Postgres-Changes.
 export function subscribeAndInvalidate(
   supabase: SupabaseClient,
   queryClient: QueryClient,
-  opts: { channel: string },           // e.g. "<product>:realtime"
+  opts: {
+    channel: string;                       // e.g. "<product>:realtime"
+    /** resource → generated query keys, e.g. { items: [listItemsQueryKey()] } */
+    keys?: Record<string, QueryKey[]>;
+  },
 ) {
   const channel = supabase
     .channel(opts.channel)
     .on("broadcast", { event: "invalidate" }, (msg) => {
       const resource = (msg.payload as { resource?: string }).resource;
-      if (resource) queryClient.invalidateQueries({ queryKey: [resource] });
+      if (!resource) return;
+      const mapped = opts.keys?.[resource];
+      if (mapped) {
+        for (const queryKey of mapped) void queryClient.invalidateQueries({ queryKey });
+      } else {
+        void queryClient.invalidateQueries({ queryKey: [resource] }); // hand-written queries
+      }
     })
     .subscribe();
   return () => {
@@ -577,23 +647,26 @@ export function subscribeAndInvalidate(
 }
 ```
 
-`app/features/home/*` (wire it — call inside the home screen's effect):
+`app/features/home/*` (wire it — call inside the home screen's effect; the product supplies
+ITS OWN generated key fns — shared core never imports them):
 ```ts
 import { useEffect } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { supabase, subscribeAndInvalidate } from "@platform/core";
+import { listItemsQueryKey } from "@platform/template-api-client";
 
 export function useItemsRealtime() {
   const queryClient = useQueryClient();
   useEffect(
-    () => subscribeAndInvalidate(supabase, queryClient, { channel: "<product>:realtime" }),
+    () =>
+      subscribeAndInvalidate(supabase, queryClient, {
+        channel: "<product>:realtime",
+        keys: { items: [listItemsQueryKey()] },
+      }),
     [queryClient],
   );
 }
 ```
-> The generated items query key must be `["items", ...]` (hey-api TanStack plugin key) so
-> `invalidateQueries({ queryKey: ["items"] })` matches. Confirm the generated key prefix in
-> `api-client/`.
 
 **Commands**
 ```bash
@@ -676,7 +749,7 @@ fly machine run \
 ```
 > `fly machine run --schedule` takes **interval keywords ONLY** —
 > `hourly` / `daily` / `weekly` / `monthly` (NOT cron expressions) — and runs are **"fuzzy"**
-> (approximate, not guaranteed at an exact minute). `daily` is fine for prune-stale-tokens. If
+> (approximate, not guaranteed at an exact minute). `daily` is fine for prune-push-tokens. If
 > a product ever needs precise cron (e.g. `0 4 * * *`), use Fly's **Cron Manager** (per-job
 > isolated machines) or **Supercronic** per Fly's task-scheduling blueprint — `--schedule`
 > alone won't do it. The one-off Verify run (no `--schedule`) is a correct one-shot.
@@ -701,25 +774,48 @@ cron needs Cron Manager / Supercronic.
 
 **Contents**
 
-`app/playwright.config.ts`:
+`app/playwright.config.ts` — two hard-won rules baked in: (1) **ports derive from
+`product.json` at config load** (`8000 + 10·portIndex` / `54321 + 100·portIndex`) — the
+"ports come from product.json" doctrine applies to EVERY file the generator copies, not just
+env/config files; hardcoded 8000/54321 here made the first stamped product's E2E hit the
+TEMPLATE's stack; (2) **both long-lived processes are Playwright `webServer` entries**
+(multi-webServer) — Playwright owns readiness + teardown, global-setup only prepares state:
 ```ts
 import { defineConfig, devices } from "@playwright/test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
+const { portIndex } = JSON.parse(
+  readFileSync(join(__dirname, "..", "product.json"), "utf8"),
+) as { portIndex: number };
+export const API_PORT = 8000 + 10 * portIndex;
+export const SUPABASE_PORT = 54321 + 100 * portIndex;
 
 export default defineConfig({
   testDir: "./e2e",
   globalSetup: "./e2e/global-setup.ts",
   timeout: 60_000,
   use: { baseURL: "http://localhost:8081", trace: "on-first-retry" },
-  webServer: {
-    command: "npx serve dist -l 8081",   // exported SPA from `expo export --platform web`
-    url: "http://localhost:8081",
-    reuseExistingServer: !process.env.CI,
-  },
+  webServer: [
+    {
+      // `-s` (SPA fallback) is REQUIRED — without it deep links like /signup 404.
+      command: "npx serve dist -s -l 8081",
+      url: "http://localhost:8081",
+      reuseExistingServer: !process.env.CI,
+    },
+    {
+      command: `uv run --project ../api uvicorn template_api.main:app --port ${API_PORT}`,
+      url: `http://localhost:${API_PORT}/healthz`,
+      reuseExistingServer: !process.env.CI,
+    },
+  ],
   projects: [{ name: "chromium", use: devices["Desktop Chrome"] }],
 });
 ```
 
-`app/e2e/items.spec.ts` (skeleton — full-stack flow):
+`app/e2e/items.spec.ts` (skeleton — full-stack flow). Selector realities from the built
+screens: **auth inputs use PLACEHOLDERS, not labels** → `getByPlaceholder`, and the Phase 6
+login button reads **"Sign in"**, not "Log in":
 ```ts
 import { test, expect } from "@playwright/test";
 
@@ -729,47 +825,73 @@ test("signup → login → items CRUD → realtime", async ({ browser }) => {
   const email = `e2e+${Date.now()}@example.com`;
 
   await pageA.goto("/signup");
-  await pageA.getByLabel("Email").fill(email);
-  await pageA.getByLabel("Password").fill("Passw0rd!");
+  await pageA.getByPlaceholder("Email").fill(email);
+  await pageA.getByPlaceholder("Password").fill("Passw0rd!");
   await pageA.getByRole("button", { name: "Sign up" }).click();
   await expect(pageA.getByRole("tab", { name: "Home" })).toBeVisible();
 
   // create an item
   await pageA.getByRole("button", { name: "Add item" }).click();
-  await pageA.getByLabel("Title").fill("first item");
+  await pageA.getByPlaceholder("Title").fill("first item");
   await pageA.getByRole("button", { name: "Save" }).click();
   await expect(pageA.getByText("first item")).toBeVisible();
 
-  // realtime: a SECOND client sees the next mutation without manual refresh
+  // realtime: a SECOND client sees the next mutation without manual refresh.
+  // NOTE (persisted-cache design): context B seeded from storageState REHYDRATES client A's
+  // persisted query cache and (fresh enough) won't refetch on mount — asserting the
+  // PRE-broadcast "first item" is visible in B FAILS BY DESIGN. The realtime proof is the
+  // POST-broadcast item appearing (its refetch also pulls the older item in).
   const b = await browser.newContext({ storageState: await a.storageState() });
   const pageB = await b.newPage();
   await pageB.goto("/");
   await pageA.getByRole("button", { name: "Add item" }).click();
-  await pageA.getByLabel("Title").fill("broadcast item");
+  await pageA.getByPlaceholder("Title").fill("broadcast item");
   await pageA.getByRole("button", { name: "Save" }).click();
   await expect(pageB.getByText("broadcast item")).toBeVisible({ timeout: 10_000 });
 });
 ```
 
-`app/e2e/global-setup.ts` (skeleton — orchestrates the real stack):
+`app/e2e/global-setup.ts` — STATE PREPARATION ONLY (the long-lived processes are the
+config's `webServer` entries): supabase up-check, migrate, seed, export. Two export traps
+are handled explicitly: (1) **`expo export` pins `NODE_ENV=production`**, so
+`.env.production`'s placeholders win over `.env.development` — parse `.env.development` and
+inject its `EXPO_PUBLIC_*` as DIRECT env vars (they beat dotenv); (2) **Metro's transform
+cache doesn't key on `EXPO_PUBLIC_*`** — export with `--clear` or the previous bundle
+replays byte-identical. Also sanitize `CI`: expo-cli's `getenv.boolish("CI")` THROWS on an
+empty-string `CI=`:
 ```ts
 import { execSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { API_PORT, SUPABASE_PORT } from "../playwright.config";
 
 export default async function globalSetup() {
-  // 1. local Supabase (per-product offset ports from config.toml)
-  execSync("pnpm --filter @platform/<product>-api supabase:start", { stdio: "inherit" });
+  // 1. local Supabase must be up (per-product offset ports from config.toml)
+  execSync(`curl -sf http://localhost:${SUPABASE_PORT}/rest/v1/ -o /dev/null || (echo "supabase not up" && exit 1)`, { stdio: "inherit", shell: "bash" });
   // 2. migrate + seed
-  execSync("cd products/_template/api && uv run alembic upgrade head && uv run python -m template_api.seed", { stdio: "inherit" });
-  // 3. start the API (background — see note)
-  // 4. export the web bundle for `npx serve dist`
-  execSync("turbo run export:web --filter=*template-app", { stdio: "inherit" });
+  execSync("uv run alembic upgrade head && uv run python -m template_api.seed", {
+    cwd: join(__dirname, "..", "..", "api"),
+    stdio: "inherit",
+  });
+  // 3. export the web bundle: .env.development values injected as DIRECT env vars + --clear
+  const envFile = readFileSync(join(__dirname, "..", ".env.development"), "utf8");
+  const publicVars = Object.fromEntries(
+    envFile.split("\n")
+      .filter((l) => l.startsWith("EXPO_PUBLIC_"))
+      .map((l) => l.split("=", 2) as [string, string]),
+  );
+  const env = { ...process.env, ...publicVars, NODE_ENV: "development" };
+  if (env.CI === "") delete env.CI; // getenv.boolish("CI") throws on empty string
+  execSync("npx expo export --platform web --clear", {
+    cwd: join(__dirname, ".."),
+    stdio: "inherit",
+    env,
+  });
 }
 ```
-> ⚠️ OPEN / TO CONFIRM: PHILOSOPHY.md says E2E runs "against exported dist + api + supabase local"
-> but does not pin the exact process-management glue (background API + teardown). The
-> skeleton above starts Supabase + exports dist; the API server should be launched as a
-> backgrounded process here (or via a second Playwright `webServer` entry) and torn down in a
-> `globalTeardown`. Confirm the process orchestration when wiring CI.
+> ✅ RESOLVED (was OPEN — process orchestration): both long-lived processes (`serve -s dist`,
+> uvicorn) are Playwright **`webServer`** entries — Playwright owns readiness + teardown;
+> global-setup only prepares state. No hand-rolled background-process/teardown glue.
 
 `packages/ui/.storybook/visual-regression.spec.ts` (iterate `storybook-static/index.json`):
 ```ts
@@ -784,6 +906,8 @@ const stories = Object.values<{ id: string; type?: string }>(index.entries).filt
 for (const story of stories) {
   for (const theme of ["light", "dark"] as const) {
     test(`${story.id} [${theme}]`, async ({ page }) => {
+      // Multiple globals are separated with `;`, NOT `,` — e.g.
+      // `globals=theme:dark;brand:demo`. The comma form silently applies NEITHER global.
       await page.goto(`/iframe.html?id=${story.id}&globals=theme:${theme}`);
       await page.waitForSelector("#storybook-root");
       await expect(page).toHaveScreenshot(`${story.id}--${theme}.png`);
@@ -791,6 +915,11 @@ for (const story of stories) {
   }
 }
 ```
+
+> **Baseline platform note:** screenshot baselines are platform-sensitive (font rendering).
+> If baselines were committed from another OS (strip the platform suffix from snapshot names
+> to share them), ubuntu CI may still diff — regenerate baselines ON the CI platform when
+> wiring real CI (document the choice in `packages/ui/playwright.config.ts`).
 
 `packages/ui/playwright.config.ts` (VR project against the static build):
 ```ts
@@ -809,7 +938,8 @@ export default defineConfig({
 });
 ```
 
-`app/.maestro/login.yaml` (local-only mobile flow):
+`app/.maestro/login.yaml` (local-only mobile flow — the button text is **"Sign in"**, per
+the Phase 6 login screen; "Log in" taps nothing):
 ```yaml
 appId: com.example.template
 ---
@@ -818,19 +948,20 @@ appId: com.example.template
 - inputText: "demo@example.com"
 - tapOn: "Password"
 - inputText: "Passw0rd!"
-- tapOn: "Log in"
+- tapOn: "Sign in"
 - assertVisible: "Home"
 ```
 
 **Commands**
 ```bash
-pnpm --filter @platform/<product>-app add -D @playwright/test serve
+pnpm --filter @platform/template-app add -D @playwright/test serve
 pnpm --filter @platform/ui add -D @playwright/test http-server
-# commit VR baselines (first run authors them):
-pnpm --filter @platform/ui storybook:build      # → storybook-static/
+# commit VR baselines (first run authors them). NOTE the script name is `build-storybook`
+# (Phase 2's committed name, also baked into packages/ui/CLAUDE.md) — NOT `storybook:build`:
+pnpm --filter @platform/ui build-storybook      # → storybook-static/
 pnpm --filter @platform/ui exec playwright test --update-snapshots
 # run web E2E locally:
-pnpm --filter @platform/<product>-app exec playwright test
+pnpm --filter @platform/template-app exec playwright test
 # Maestro (local, needs a running simulator/dev build):
 maestro test products/_template/app/.maestro/login.yaml
 ```
@@ -969,6 +1100,36 @@ jobs:
 matrix `flyctl deploy -c fly.staging.toml`; tags → prod." Trunk-based: `main` → staging,
 `<product>-api-v*` tag → that product's production.
 
+#### `eas.json` + `vercel.json` (per product — created HERE, explicitly)
+
+**Files** — `products/_template/eas.json`, `products/_template/vercel.json`
+
+Both are in PHILOSOPHY's tree but **no earlier phase creates them** (Phase 2 built the app
+shell without them — a gap the 2026-07-05 run closed here). The EAS workflows below need
+`eas.json`'s profiles/channels, and Vercel needs the SPA rewrite:
+
+```jsonc
+// products/_template/eas.json — eas-cli >= 16; appVersionSource remote.
+// Channel names are EXACTLY `staging` / `production` (the workflows depend on them).
+{
+  "cli": { "version": ">= 16.0.0", "appVersionSource": "remote" },
+  "build": {
+    "staging": { "channel": "staging", "distribution": "internal" },
+    "production": { "channel": "production", "autoIncrement": true }
+  },
+  "submit": { "production": {} }
+}
+```
+
+```json
+{
+  "rewrites": [{ "source": "/(.*)", "destination": "/index.html" }]
+}
+```
+(The `vercel.json` SPA rewrite is the web mirror of the desktop `app://` SPA fallback —
+`web.output: "single"` produces one `index.html` and client-side routing needs every deep
+link rewritten to it.)
+
 #### `eas-build.yml`
 
 **Files** — `.github/workflows/eas-build.yml`
@@ -1057,7 +1218,11 @@ jobs:
       - uses: jdx/mise-action@v4
       - run: pnpm install --frozen-lockfile
       - uses: expo/expo-github-action@v8
-        with: { eas-version: latest, token: ${{ secrets.EXPO_TOKEN }} }
+        with:
+          eas-version: latest
+          # NOTE: an ${{ }} expression inside a YAML FLOW mapping (`with: { token: ${{...}} }`)
+          # is INVALID YAML — use block mapping (or quote the expression).
+          token: ${{ secrets.EXPO_TOKEN }}
       - name: OTA (staging on main, production on tag)
         working-directory: products/${{ matrix.product == 'template' && '_template' || matrix.product }}/app
         run: |
@@ -1096,19 +1261,24 @@ on:
 jobs:
   web-e2e:
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:16
-        env: { POSTGRES_PASSWORD: postgres }
-        ports: ["5432:5432"]
-        options: >-
-          --health-cmd "pg_isready" --health-interval 10s --health-timeout 5s --health-retries 5
     steps:
       - uses: actions/checkout@v6
       - uses: jdx/mise-action@v4
+      # The web E2E drives the REAL local stack — it needs the Supabase CLI (the harness
+      # health-checks kong + uses the local DB), the api's Python env, and the api env vars
+      # (a clean CI checkout has NO api/.env):
+      - uses: supabase/setup-cli@v1
+      - run: supabase start
+        working-directory: products/_template
       - run: pnpm install --frozen-lockfile
+      - run: uv sync --frozen --project products/_template/api
       - run: pnpm exec playwright install --with-deps chromium
       - name: Web E2E (signup → login → CRUD → realtime)
+        env:
+          DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:54322/postgres
+          DATABASE_MIGRATION_URL: postgresql+psycopg://postgres:postgres@localhost:54322/postgres
+          SUPABASE_URL: http://localhost:54321
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_LOCAL_SERVICE_ROLE_KEY }} # or parse from `supabase status`
         run: pnpm --filter @platform/template-app exec playwright test
   visual-regression:
     runs-on: ubuntu-latest
@@ -1118,13 +1288,17 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm exec playwright install --with-deps chromium
       - name: Build Storybook
-        run: pnpm --filter @platform/ui storybook:build
+        # script name is `build-storybook` (Phase 2's committed name) — NOT `storybook:build`
+        run: pnpm --filter @platform/ui build-storybook
       - name: Visual regression (each story × light/dark vs committed baselines)
         run: pnpm --filter @platform/ui exec playwright test
 ```
 > Two independent jobs so a VR diff doesn't mask an E2E failure (and vice versa). VR baselines
 > are committed; a diff fails the job and uploads the comparison (add an
-> `actions/upload-artifact` step for the Playwright report when wiring CI for real).
+> `actions/upload-artifact` step for the Playwright report when wiring CI for real). The
+> web-e2e job runs against the SUPABASE LOCAL stack (not a bare postgres service container) —
+> the E2E exercises auth + realtime, which need the full stack; baselines may need
+> regeneration on ubuntu if they were committed from another OS (see step e).
 
 **Commands** — Actions → "E2E Nightly" → **Run workflow** (`workflow_dispatch`).
 
@@ -1147,12 +1321,20 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
+    env:
+      # MUST be defined at JOB level: a step-level `env:` is NOT visible inside another
+      # step's `if:` expression — with it only step-level, `env.MAC_CSC_LINK` evaluates as
+      # empty context in the `if:` and actionlint flags it.
+      MAC_CSC_LINK: ${{ secrets.MAC_CSC_LINK }}          # PLACEHOLDER (empty until certs exist)
     steps:
       - uses: actions/checkout@v6
       - uses: jdx/mise-action@v4
       - run: pnpm install --frozen-lockfile
       - name: Resolve product token (from the desktop tag)
         id: tag
+        # `shell: bash` is REQUIRED — the windows runner defaults to pwsh, where the bash
+        # parameter expansion below is a syntax error.
+        shell: bash
         run: echo "product=${GITHUB_REF_NAME%%-desktop-v*}" >> "$GITHUB_OUTPUT"
       - name: Build the web bundle the desktop wraps
         run: pnpm turbo run export:web --filter=*-app
@@ -1162,15 +1344,12 @@ jobs:
         working-directory: products/${{ steps.tag.outputs.product == 'template' && '_template' || steps.tag.outputs.product }}/desktop
         env:
           GH_TOKEN: ${{ secrets.DESKTOP_RELEASES_TOKEN }}   # PLACEHOLDER (token for <org>/<product>-desktop-releases)
-          MAC_CSC_LINK: ${{ secrets.MAC_CSC_LINK }}          # PLACEHOLDER (empty until certs exist)
           CSC_LINK: ${{ secrets.MAC_CSC_LINK }}              # electron-builder reads CSC_LINK
           CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
         run: pnpm electron-builder --publish always
       - name: electron-builder — macOS build-only (no certs yet)
         if: runner.os == 'macOS' && env.MAC_CSC_LINK == ''
         working-directory: products/${{ steps.tag.outputs.product == 'template' && '_template' || steps.tag.outputs.product }}/desktop
-        env:
-          MAC_CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
         run: pnpm electron-builder --mac --publish never   # builds unsigned; does NOT publish the mac artifact
 ```
 > The tag must match `desktop/package.json` `version`. RESOLVED (tag→product parse): the `tag`
@@ -1420,6 +1599,14 @@ product-scoped and load from the session's project root.
   `git grep -inE 'example|TODO'` should surface exactly these and nothing else. (The former
   `PARSE-FROM-TAG` placeholders in `eas-build.yml`/`electron-release.yml` are now resolved to
   real `${GITHUB_REF_NAME%%-<surface>-v*}` parse steps.)
+- **Port-squatting when re-verifying servers.** A leftover E2E `uvicorn` can squat port 8000
+  and silently serve a SECOND instance's curl checks — before re-verifying, find the PID via
+  `netstat` and kill it (on Windows, kill `electron.exe`/`python.exe` itself, not a shim).
+- **Shared-core skeletons must stay product-agnostic.** Any `core/*` snippet that names
+  `@platform/<product>-api-client` is a bug by construction — core is never stamped. The
+  injected forms in steps (a)/(b)/(c) (`configureApiClient(client, …)`,
+  `registerForPushNotifications(post)`, the `keys` map) are the pattern; a product passes
+  its own generated symbols from its own `_layout.tsx`/feature code.
 
 ---
 
@@ -1433,6 +1620,10 @@ Maps 1:1 to the Phase 8 Verify row.
    git push -u origin phase-8-cicd
    # GitHub → Actions → "CI" run is green (lint/typecheck/test/build/openapi + drift)
    ```
+   > Caveat: `ci.yml` triggers on `pull_request` + push to `main` only — a bare
+   > feature-branch push does NOT fire it. Open a PR, or (if PRs aren't possible in the
+   > session) run the CI steps locally as the evidence:
+   > `pnpm turbo run lint typecheck test build openapi --affected` + the drift check.
 2. **Touch one product → other is cache-hit.**
    ```bash
    # touch demo only:
@@ -1454,6 +1645,10 @@ Maps 1:1 to the Phase 8 Verify row.
    # the "broadcast item" assertion on the second context passing IS this proof.
    # Manual: open localhost:8081 in two tabs, add an item in one → the other refreshes.
    ```
+   > The STAMPED product's harness is proof the port-derivation holds: in the 2026-07-05
+   > audit, `products/demo/app`'s E2E ran end-to-end on demo's OWN stack (kong 54421, DB
+   > 54422, API 8010, `demo:realtime` channel, demo's service-role key) — 1 passed. Run it
+   > after any generator change.
 5. **API log lines carry the `request_id`.**
    ```bash
    curl -s -H "X-Request-Id: test-rid-123" http://localhost:8000/v1/hello
@@ -1464,7 +1659,7 @@ Maps 1:1 to the Phase 8 Verify row.
    ```bash
    # GitHub → Actions → "E2E Nightly" → Run workflow (branch: main)
    # both jobs (web-e2e, visual-regression) green.
-   # Locally: pnpm --filter @platform/ui storybook:build &&
+   # Locally: pnpm --filter @platform/ui build-storybook &&
    #          pnpm --filter @platform/ui exec playwright test   # VR vs baselines
    ```
 7. **Scheduled task runs via `fly machine run`.**
@@ -1474,6 +1669,10 @@ Maps 1:1 to the Phase 8 Verify row.
      python -m template_api.tasks prune-push-tokens
    # Fly logs show the JSON line {"event":"pruned_push_tokens","count":N}
    ```
+   > While the Fly app is still a placeholder (no real infra), the equivalent local
+   > evidence: run the task module directly against the real local DB —
+   > `uv run python -m template_api.tasks prune-push-tokens` emits the exact documented
+   > JSON line; a bare invocation prints usage and exits 2.
 
 ---
 
@@ -1484,8 +1683,8 @@ commits):
 
 1. `feat(obs): request_id middleware + structlog JSON + Sentry both sides + X-Request-Id` —
    step (a).
-2. `feat(push): push-token model/router/service + send_push (httpx) + core registration` —
-   step (b).
+2. `feat(push): push tests (mocked httpx) + injected core registration + app wiring` —
+   step (b) (the model/router/service/migration shipped in Phase 3 — verified here).
 3. `feat(realtime): broadcast-only invalidation (api broadcast + core subscribe-and-invalidate)` —
    step (c).
 4. `feat(api): scheduled tasks.py prune-push-tokens + Fly machine docs` — step (d).
@@ -1503,10 +1702,13 @@ commits):
   should fail the mutation. Default here: log + swallow (writes never blocked by a Realtime
   outage). Confirm per product.
 - ⚠️ **OPEN / TO CONFIRM — "stale" push-token definition:** PHILOSOPHY.md says "prune stale push
-  tokens" without a threshold. Default: 90 days by `updated_at`. Needs an `updated_at` column
-  on the token (base model or the table).
-- ⚠️ **OPEN / TO CONFIRM — E2E process orchestration:** the exact background-API start +
-  teardown glue in `global-setup.ts`/`globalTeardown` is not pinned by PHILOSOPHY.md.
+  tokens" without a threshold; the gospel is silent. **90 days by `updated_at` is now the
+  ALIGNED default across Phase 3 (`prune_stale(older_than_days=90)`) and this phase** —
+  tune per product. (`updated_at` already exists on Phase 3's `UUIDModel` base.)
+- **RESOLVED — E2E process orchestration:** Playwright **multi-`webServer`** owns both
+  long-lived processes (`serve -s dist`, uvicorn) — readiness + teardown included;
+  global-setup only prepares state (supabase up-check, migrate, seed, export). No
+  hand-rolled background/teardown glue.
 - **RESOLVED — `--affected` base ref in CI:** with `fetch-depth: 0` Turbo auto-detects the
   base (PR base ref / previous push commit); `ci.yml` also sets `TURBO_SCM_BASE`/`TURBO_SCM_HEAD`
   explicitly to be robust against squash-merge histories. Revisit only if CI mis-scopes.

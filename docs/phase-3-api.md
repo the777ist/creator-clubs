@@ -104,8 +104,8 @@ Python-deps notes in "Config essentials & gotchas"; and the API unit + integrati
       `DATABASE_MIGRATION_URL` (direct **5432**) is used only by Alembic.
 - [ ] `alembic/` has an **initial migration** that creates `item` + `push_token` AND
       applies **RLS deny-all** on every table (the API's privileged role bypasses it).
-- [ ] `seed.py` populates local dev data; `tasks.py` ships the prune-stale-push-tokens
-      example (Fly scheduled machine target).
+- [ ] `seed.py` populates local dev data; `tasks.py` ships the `prune-push-tokens`
+      example (Fly scheduled machine target; 90-day default window).
 - [ ] `export_openapi.py` writes `app.openapi()` JSON with **sorted keys**, **no server**.
 - [ ] `Dockerfile` is multi-stage on `ghcr.io/astral-sh/uv` (`uv sync --frozen --no-dev` →
       slim runtime). `fly.staging.toml` / `fly.production.toml` set the app names and a
@@ -140,28 +140,29 @@ version = "0.0.0"
 description = "Template product FastAPI service"
 requires-python = ">=3.13"
 dependencies = [
-  "fastapi==0.124.4",              # current stable (2025-12-12); uses lifespan, not on_event
-  "uvicorn[standard]",
+  "fastapi==0.139.0",              # current stable (2026-07-05); uses lifespan, not on_event
+  "uvicorn[standard]",             # resolved 0.50.0 (2026-07-05)
   "pydantic-settings",
-  "sqlmodel==0.0.27",              # pre-1.0 — pin exact; Pydantic v2 + SQLAlchemy 2 compatible
+  "sqlmodel==0.0.39",              # pre-1.0 — pin exact; Pydantic v2 + SQLAlchemy 2 compatible
   "sqlalchemy[postgresql-psycopg]",
   "psycopg[binary]",
-  "alembic",
+  "alembic",                       # resolved 1.18.5 (2026-07-05)
   "pyjwt[crypto]",
   "httpx",
   "sentry-sdk[fastapi]",
   "structlog",
-  "slowapi==0.1.9",                # ⚠️ REVIEW: pin to the current slowapi release (self-described "alpha" — pin exact)
-  "uuid-utils==0.10.0",            # ⚠️ REVIEW: pin to the exact current uuid-utils release. Maintained UUIDv7 generator (Rust-backed, returns a stdlib-compatible UUID). Alt: uuid6. See note below.
+  "slowapi==0.1.10",               # ⚠️ REVIEW at every /update: self-described "alpha" — pin exact AND re-verify its middleware against the installed FastAPI (see Step 10)
+  "uuid-utils==0.16.2",            # Maintained UUIDv7 generator (Rust-backed, returns a stdlib-compatible UUID). Alt: uuid6. See note below.
 ]
 
 [dependency-groups]
 dev = [
-  "pytest==9.0.3",                 # current (April 2026)
+  "pytest==9.1.1",                 # current (2026-07-05)
   "pytest-asyncio==1.4.0",         # 1.x defaults to asyncio_mode="strict" → markers required (configured below)
-  "ruff==0.15.0",                  # current (2026-02-03)
+  "ruff==0.15.20",                 # current (2026-07-05)
   "pyright",
-  "polyfactory",                   # current 2.x line — pin exact when locking
+  "polyfactory",                   # 3.x line (3.3.0) — ModelFactory[DTO] usage unchanged from 2.x; pin exact when locking
+  "httpx2",                        # REQUIRED for pyright strict: starlette 1.3 deprecates plain httpx in starlette.testclient ("install httpx2 instead" — it does `import httpx2 as httpx` when present) and its annotations reference httpx._types aliases that httpx 0.28 removed — without httpx2, every TestClient.get/post collapses to Unknown (~40 strict errors). Runtime `httpx` stays (send_push per PHILOSOPHY).
 ]
 
 [build-system]
@@ -282,6 +283,7 @@ class Settings(BaseSettings):
 
     # --- Auth (Supabase) ---
     supabase_url: AnyHttpUrl | None = Field(default=None)        # JWKS discovery base
+    supabase_jwks_url: AnyHttpUrl | None = Field(default=None)   # explicit per-env override (rarely needed)
     supabase_jwt_secret: str | None = Field(default=None)        # HS256 genuine fallback only
     jwt_audience: str = Field(default="authenticated")
 
@@ -301,6 +303,15 @@ class Settings(BaseSettings):
     def cors_origin_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
 
+    @property
+    def jwks_url(self) -> str | None:
+        """Resolved JWKS endpoint: explicit override wins, else derived from supabase_url."""
+        if self.supabase_jwks_url is not None:
+            return str(self.supabase_jwks_url)
+        if self.supabase_url is not None:
+            return f"{str(self.supabase_url).rstrip('/')}/auth/v1/.well-known/jwks.json"
+        return None
+
 
 @lru_cache
 def get_settings() -> Settings:
@@ -310,8 +321,16 @@ def get_settings() -> Settings:
 **Commands:** none (imported lazily).
 
 **Why:** one typed config surface. The two distinct URLs encode Key ruling #4 — runtime
-over the pooler, migrations over the direct port. `.env.example` (Step 24 / generator)
-documents every consumed var per the Operational defaults bullet.
+over the pooler, migrations over the direct port. `supabase_jwks_url` is the explicit
+per-env JWKS override the Phase 6 DoD requires; the `jwks_url` property resolves
+override-else-derived so `auth.py` consumes one value. `.env.example` (Step 24 / generator)
+documents every consumed var (including `SUPABASE_JWKS_URL=`) per the Operational defaults
+bullet.
+
+> **Test gotcha:** `env_file=".env"` means pydantic-settings reads `api/.env` for any UNSET
+> field — hermetic tests that construct `Settings(...)` directly must pass **every** auth
+> field explicitly (`supabase_url=None, supabase_jwks_url=None, supabase_jwt_secret=...`),
+> or a developer's local `.env` leaks into the test.
 
 ---
 
@@ -423,14 +442,19 @@ def _problem(
 
 
 def register_exception_handlers(app: FastAPI) -> None:
+    # The decorated inner handlers are "unused" to pyright strict — targeted ignores.
     @app.exception_handler(ProblemException)
-    async def _on_problem(request: Request, exc: ProblemException) -> JSONResponse:
+    async def _on_problem(  # pyright: ignore[reportUnusedFunction]
+        request: Request, exc: ProblemException
+    ) -> JSONResponse:
         return _problem(
             request, status=exc.status, title=exc.title, detail=exc.detail, type_=exc.type_
         )
 
     @app.exception_handler(StarletteHTTPException)
-    async def _on_http(request: Request, exc: StarletteHTTPException) -> JSONResponse:
+    async def _on_http(  # pyright: ignore[reportUnusedFunction]
+        request: Request, exc: StarletteHTTPException
+    ) -> JSONResponse:
         return _problem(
             request,
             status=exc.status_code,
@@ -440,7 +464,7 @@ def register_exception_handlers(app: FastAPI) -> None:
         )
 
     @app.exception_handler(RequestValidationError)
-    async def _on_validation(
+    async def _on_validation(  # pyright: ignore[reportUnusedFunction]
         request: Request, exc: RequestValidationError
     ) -> JSONResponse:
         return _problem(
@@ -452,10 +476,11 @@ def register_exception_handlers(app: FastAPI) -> None:
         )
 
     @app.exception_handler(RateLimitExceeded)
-    async def _on_rate_limit(
+    async def _on_rate_limit(  # pyright: ignore[reportUnusedFunction]
         request: Request, exc: RateLimitExceeded
     ) -> JSONResponse:
-        # slowapi raises this; we render it as problem+json (429).
+        # Kept for decorator-based per-route limits; the RateLimitMiddleware (Step 10)
+        # renders its own 429 inline (middleware short-circuits never reach handlers).
         return _problem(
             request,
             status=429,
@@ -483,11 +508,8 @@ the generated client.
 ```python
 import base64
 import json
-from typing import Generic, TypeVar
 
 from pydantic import BaseModel, ConfigDict
-
-T = TypeVar("T")
 
 DEFAULT_LIMIT = 20
 MAX_LIMIT = 100
@@ -510,7 +532,9 @@ def clamp_limit(limit: int) -> int:
     return max(1, min(limit, MAX_LIMIT))
 
 
-class Page(BaseModel, Generic[T]):
+# PEP 695 generic syntax — ruff UP046 (0.15+) rejects the legacy
+# `class Page(BaseModel, Generic[T])` form under this config; Pydantic v2 supports PEP 695.
+class Page[T](BaseModel):
     """Cursor-paginated page envelope. useInfiniteQuery-ready."""
 
     model_config = ConfigDict(strict=True)
@@ -546,8 +570,8 @@ endpoint declares its own `Page[ItemRead]` response.
 from datetime import datetime, timezone
 from uuid import UUID
 
-from sqlalchemy import func
-from sqlmodel import Column, DateTime, Field, SQLModel
+from sqlalchemy import DateTime, func
+from sqlmodel import Field, SQLModel
 from uuid_utils import uuid7  # maintained UUIDv7 generator (or: from uuid6 import uuid7)
 
 
@@ -556,16 +580,24 @@ def _utcnow() -> datetime:
 
 
 class UUIDModel(SQLModel):
-    """Shared base: UUIDv7 primary key + created/updated timestamps. Persistence only."""
+    """Shared base: UUIDv7 primary key + created/updated timestamps. Persistence only.
+
+    MIXIN-SAFE: sa_type + sa_column_kwargs build a FRESH Column per inheriting table.
+    Never use sa_column=Column(...) in a shared base — a concrete Column object binds to
+    exactly ONE Table, so the SECOND table to inherit fails with
+    "Column object 'created_at' already assigned to Table 'item'".
+    """
 
     id: UUID = Field(default_factory=uuid7, primary_key=True, index=True)
     created_at: datetime = Field(
         default_factory=_utcnow,
-        sa_column=Column(DateTime(timezone=True), server_default=func.now()),
+        sa_type=DateTime(timezone=True),
+        sa_column_kwargs={"server_default": func.now()},
     )
     updated_at: datetime = Field(
         default_factory=_utcnow,
-        sa_column=Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now()),
+        sa_type=DateTime(timezone=True),
+        sa_column_kwargs={"server_default": func.now(), "onupdate": func.now()},
     )
 ```
 
@@ -577,7 +609,8 @@ from .base import UUIDModel
 
 
 class Item(UUIDModel, table=True):
-    __tablename__ = "item"
+    # pyright strict flags the literal vs SQLAlchemy's declared_attr — targeted ignore.
+    __tablename__ = "item"  # pyright: ignore[reportAssignmentType]
 
     title: str = Field(index=True, max_length=200)
     description: str | None = Field(default=None, max_length=2000)
@@ -592,7 +625,7 @@ from .base import UUIDModel
 
 
 class PushToken(UUIDModel, table=True):
-    __tablename__ = "push_token"
+    __tablename__ = "push_token"  # pyright: ignore[reportAssignmentType]
     __table_args__ = (UniqueConstraint("user_id", "device_id", name="uq_push_user_device"),)
 
     user_id: str = Field(index=True)         # Supabase auth user id
@@ -614,10 +647,9 @@ __all__ = ["UUIDModel", "Item", "PushToken"]
 **Why:** models are **persistence only** (Key ruling #10) — no business logic, no
 serialization. UUIDv7 PKs are the locked DB convention (generated via the maintained
 `uuid-utils`/`uuid6`, NOT the stale `uuid7`/`uuid_extensions` package — see Step 1); the
-time-ordered property is what makes the cursor pagination keyset stable. ⚠️ REVIEW: confirm
-`uuid_utils.uuid7()` coerces into the stdlib-`UUID`-typed `id` column under pyright strict +
-Pydantic strict; if the chosen lib returns its own UUID subtype, wrap with `uuid.UUID(str(...))`
-in the `default_factory` or switch to `uuid6` (which returns a stdlib `uuid.UUID`).
+time-ordered property is what makes the cursor pagination keyset stable. (Confirmed
+2026-07-05: `uuid_utils.uuid7()` coerces cleanly into the stdlib-`UUID`-typed `id` column
+under pyright strict + Pydantic strict — no wrapper needed.)
 `push_token` carries the per-user+device row
 PHILOSOPHY.md specifies for the push loop. These tables are created by the initial Alembic
 migration (Step 20), never by `SQLModel.metadata.create_all` in production.
@@ -631,6 +663,8 @@ migration (Step 20), never by `SQLModel.metadata.create_all` in production.
 
 **Contents** — `base.py`:
 ```python
+from typing import Annotated
+
 from fastapi import Depends
 from sqlmodel import Session
 
@@ -643,9 +677,14 @@ class BaseService:
     Services are real cohesive objects (NOT staticmethod buckets): each owns its
     aggregate's business logic AND data access. No repository layer — services query
     directly via self.session.
+
+    The Annotated form (not `session: Session = Depends(...)`) is the FastAPI-recommended
+    shape AND the only one that passes ruff B008 (no function call in a default argument).
+    Outside a request (seed.py, tasks.py, tests) pass a real Session explicitly:
+    `PushService(session=session)`.
     """
 
-    def __init__(self, session: Session = Depends(get_session)) -> None:
+    def __init__(self, session: Annotated[Session, Depends(get_session)]) -> None:
         self.session = session
 ```
 
@@ -653,7 +692,7 @@ class BaseService:
 ```python
 from uuid import UUID
 
-from sqlmodel import select
+from sqlmodel import col, select
 
 from ..errors import ProblemException
 from ..models import Item
@@ -666,9 +705,11 @@ class ItemService(BaseService):
     def list(self, *, owner_id: str, cursor: str | None, limit: int) -> Page[ItemRead]:
         limit = clamp_limit(limit)
         after = decode_cursor(cursor)
-        stmt = select(Item).where(Item.owner_id == owner_id).order_by(Item.id)
+        # col() wraps are REQUIRED under pyright strict: bare `Item.id` types as UUID (the
+        # instance attribute), so `.order_by(Item.id)` / `Item.id > ...` fail type-checking.
+        stmt = select(Item).where(Item.owner_id == owner_id).order_by(col(Item.id))
         if after is not None:
-            stmt = stmt.where(Item.id > UUID(after))
+            stmt = stmt.where(col(Item.id) > UUID(after))
         rows = self.session.exec(stmt.limit(limit + 1)).all()
         has_more = len(rows) > limit
         page = rows[:limit]
@@ -711,9 +752,11 @@ class ItemService(BaseService):
 `push_service.py`:
 ```python
 from datetime import datetime, timedelta, timezone
+from typing import Any, cast
 
 import httpx
-from sqlmodel import delete, select
+from sqlalchemy import CursorResult
+from sqlmodel import col, delete, select
 
 from ..models import PushToken
 from ..schemas.push import PushTokenCreate, PushTokenRead
@@ -755,11 +798,20 @@ class PushService(BaseService):
             async with httpx.AsyncClient(timeout=10) as client:
                 await client.post(get_settings().expo_push_url, json=messages)
 
-    def prune_stale(self, *, older_than_days: int = 60) -> int:
+    def prune_stale(self, *, older_than_days: int = 90) -> int:
+        # 90-day window is the aligned default (Phase 8 DoD); tune per product (⚠️ OPEN).
         cutoff = datetime.now(timezone.utc) - timedelta(days=older_than_days)
         # DELETE/UPDATE go through Session.execute() — SQLModel's exec() only types select()
-        # (delete()/update() break pyright strict AND don't expose .rowcount). Key ruling DB.
-        result = self.session.execute(delete(PushToken).where(PushToken.updated_at < cutoff))
+        # (delete()/update() break pyright strict AND don't expose .rowcount, fastapi/sqlmodel
+        # #909). SQLModel deprecates execute() in favor of the very exec() that can't type
+        # delete(), so the reportDeprecated ignore is DELIBERATE; the cast recovers .rowcount
+        # under pyright strict. Key ruling DB.
+        result = cast(
+            "CursorResult[Any]",
+            self.session.execute(  # pyright: ignore[reportDeprecated]
+                delete(PushToken).where(col(PushToken.updated_at) < cutoff)
+            ),
+        )
         self.session.commit()
         return result.rowcount or 0
 ```
@@ -768,9 +820,9 @@ class PushService(BaseService):
 
 **Why:** services are the **only** layer that touches both business logic and data access
 (no repository layer, Key ruling #10). Each takes the `Session` via `Depends` in
-`__init__`, so a router declares `svc: ItemService = Depends()` and FastAPI wires the
-session through. `send_push()` uses httpx exactly as PHILOSOPHY.md specifies (mockable via httpx
-mock transport in unit tests); `prune_stale()` is the scheduled-job entry point.
+`__init__`, so a router declares `svc: Annotated[ItemService, Depends()]` and FastAPI wires
+the session through. `send_push()` uses httpx exactly as PHILOSOPHY.md specifies (mockable via
+httpx mock transport in unit tests); `prune_stale()` is the scheduled-job entry point.
 
 ---
 
@@ -896,8 +948,8 @@ def _decode(token: str, settings: Settings) -> dict[str, object]:
     # Supabase projects sign asymmetrically by default, and the local CLI now ALSO issues
     # ES256 by default (since CLI v2.71.1) — so point SUPABASE_URL at http://localhost:54321
     # locally and let PyJWKClient hit the local /auth/v1/.well-known/jwks.json too. (Ruling #5)
-    if settings.supabase_url is not None:
-        jwks_url = f"{str(settings.supabase_url).rstrip('/')}/auth/v1/.well-known/jwks.json"
+    jwks_url = settings.jwks_url  # explicit SUPABASE_JWKS_URL override, else derived (Step 2)
+    if jwks_url is not None:
         try:
             signing_key = _jwks_client(jwks_url).get_signing_key_from_jwt(token)
             return jwt.decode(
@@ -954,9 +1006,10 @@ required for ES256/RS256. `CurrentUser` is the dependency routers attach to prot
 endpoints; full auth screens + guards land in Phase 6, but the backend verification is built
 here so `/v1/me` and owner-scoped items work.
 
-> ⚠️ **REVIEW (JWKS path):** confirm the JWKS discovery path
-> `{supabase_url}/auth/v1/.well-known/jwks.json` against the live project at integration time
-> (Phase 6) — it has historically matched, but verify when the project exists.
+> ✅ **RESOLVED (JWKS path, 2026-07-05):** verified LIVE against the local stack in the
+> Phase 6 run — CLI 2.109 issues `alg: ES256` access tokens and `/v1/me` returns 200 with
+> **no** `SUPABASE_JWT_SECRET` set (pure JWKS verification via
+> `{supabase_url}/auth/v1/.well-known/jwks.json`). Re-confirm once a HOSTED project exists.
 
 ---
 
@@ -971,8 +1024,11 @@ from collections.abc import Awaitable, Callable
 import jwt
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from slowapi import Limiter
+from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
+from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 
 from .settings import get_settings
 
@@ -998,7 +1054,43 @@ def _rate_key(request: Request) -> str:
 
 def build_limiter() -> Limiter:
     s = get_settings()
-    return Limiter(key_func=_rate_key, default_limits=[s.rate_limit_default])
+    # key_style="url": the direct _check_request_limit call below passes no endpoint
+    # function, so the limiter must key on the request path instead.
+    return Limiter(
+        key_func=_rate_key, default_limits=[s.rate_limit_default], key_style="url"
+    )
+
+
+class RateLimitMiddleware(BaseHTTPMiddleware):
+    """Thin replacement for slowapi's SlowAPIMiddleware, which is silently BROKEN on
+    current FastAPI: SlowAPIMiddleware resolves the endpoint via route.matches(scope), and
+    FastAPI 0.139 wraps routers in new _IncludedRouter internals where matches() returns
+    Match.NONE for EVERY route (even /healthz) — so _should_exempt exempts every request
+    and default limits NEVER fire (verified: 120 requests -> 120x200, zero 429s).
+    This middleware calls the limiter check directly; with key_style="url" no endpoint
+    function is needed. The 429 is rendered problem+json INLINE because a middleware
+    short-circuit never reaches the app's exception handlers."""
+
+    async def dispatch(
+        self, request: Request, call_next: RequestResponseEndpoint
+    ) -> Response:
+        limiter: Limiter = request.app.state.limiter
+        if limiter.enabled:
+            try:
+                limiter._check_request_limit(request, None, True)  # pyright: ignore[reportPrivateUsage]
+            except RateLimitExceeded as exc:
+                return JSONResponse(
+                    status_code=429,
+                    content={
+                        "type": "about:blank",
+                        "title": "Too Many Requests",
+                        "status": 429,
+                        "detail": f"Rate limit exceeded: {exc.detail}",
+                        "instance": str(request.url.path),
+                    },
+                    media_type="application/problem+json",
+                )
+        return await call_next(request)
 
 
 def install_security(app: FastAPI) -> None:
@@ -1032,8 +1124,11 @@ def install_security(app: FastAPI) -> None:
 
 **Why:** the API hardening bullet — env-driven CORS allowlist, security-headers middleware,
 and slowapi rate limiting (per-IP + per-user) — every product inherits these defaults. The
-limiter is instantiated here and attached to `app.state` in `main.py`; the 429 it raises is
-rendered as problem+json by the handler in Step 4.
+limiter is instantiated here, attached to `app.state` in `main.py`, and enforced by
+`RateLimitMiddleware` (NOT slowapi's own `SlowAPIMiddleware` — see the class docstring; keep
+the ⚠️ that slowapi is self-described alpha and **re-verify the limiter against the installed
+FastAPI on every `/update`**). The `RateLimitExceeded` handler in Step 4 stays for any future
+decorator-based per-route limits, but the middleware's own 429 is rendered inline.
 
 > **Per-user rate key (resolved):** key on the JWT **`sub`** claim, not a token slice — a
 > token slice keys per-*token* (a refreshed token = a new bucket) and is effectively random
@@ -1141,6 +1236,7 @@ but the route + verification exist from here.
 
 **Contents:**
 ```python
+from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, status
@@ -1157,11 +1253,14 @@ router = APIRouter(
     responses={404: {"model": Problem}, 401: {"model": Problem}},
 )
 
+# Annotated dependency (FastAPI-recommended; `svc: ItemService = Depends()` trips ruff B008).
+ItemSvc = Annotated[ItemService, Depends()]
+
 
 @router.get("", response_model=Page[ItemRead])
 def list_items(
     user: CurrentUser,
-    svc: ItemService = Depends(),
+    svc: ItemSvc,
     cursor: str | None = None,
     limit: int = DEFAULT_LIMIT,
 ) -> Page[ItemRead]:
@@ -1169,24 +1268,24 @@ def list_items(
 
 
 @router.post("", response_model=ItemRead, status_code=status.HTTP_201_CREATED)
-def create_item(user: CurrentUser, data: ItemCreate, svc: ItemService = Depends()) -> ItemRead:
+def create_item(user: CurrentUser, data: ItemCreate, svc: ItemSvc) -> ItemRead:
     return svc.create(owner_id=user.id, data=data)
 
 
 @router.get("/{item_id}", response_model=ItemRead)
-def get_item(user: CurrentUser, item_id: UUID, svc: ItemService = Depends()) -> ItemRead:
+def get_item(user: CurrentUser, item_id: UUID, svc: ItemSvc) -> ItemRead:
     return svc.get(owner_id=user.id, item_id=item_id)
 
 
 @router.patch("/{item_id}", response_model=ItemRead)
 def update_item(
-    user: CurrentUser, item_id: UUID, data: ItemUpdate, svc: ItemService = Depends()
+    user: CurrentUser, item_id: UUID, data: ItemUpdate, svc: ItemSvc
 ) -> ItemRead:
     return svc.update(owner_id=user.id, item_id=item_id, data=data)
 
 
 @router.delete("/{item_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_item(user: CurrentUser, item_id: UUID, svc: ItemService = Depends()) -> None:
+def delete_item(user: CurrentUser, item_id: UUID, svc: ItemSvc) -> None:
     svc.delete(owner_id=user.id, item_id=item_id)
 ```
 
@@ -1203,6 +1302,8 @@ cursor envelope Phase 4's `useInfiniteQuery` consumes.
 
 **Contents:**
 ```python
+from typing import Annotated
+
 from fastapi import APIRouter, Depends, status
 
 from ..auth import CurrentUser
@@ -1211,10 +1312,12 @@ from ..services.push_service import PushService
 
 router = APIRouter(prefix="/v1/push-tokens", tags=["push"])
 
+PushSvc = Annotated[PushService, Depends()]
+
 
 @router.post("", response_model=PushTokenRead, status_code=status.HTTP_201_CREATED)
 def register_token(
-    user: CurrentUser, data: PushTokenCreate, svc: PushService = Depends()
+    user: CurrentUser, data: PushTokenCreate, svc: PushSvc
 ) -> PushTokenRead:
     return svc.register(user_id=user.id, data=data)
 ```
@@ -1232,32 +1335,47 @@ provides token registration in the locked thin shape.
 **Contents:**
 ```python
 from fastapi import FastAPI
-from slowapi.middleware import SlowAPIMiddleware
+from fastapi.routing import APIRoute
 
 from .errors import register_exception_handlers
 from .middleware import install_request_id
 from .routers import hello, items, me, push
 from .schemas.common import StrictDTO
-from .security import build_limiter, install_security
+from .security import RateLimitMiddleware, build_limiter, install_security
 
 
 class Health(StrictDTO):
     status: str
 
 
-def create_app() -> FastAPI:
-    app = FastAPI(title="template_api", version="0.0.0")
+def _operation_id(route: APIRoute) -> str:
+    # Clean operationIds for the generated TS client (Phase 4): `list_items`, not FastAPI's
+    # default `list_items_v1_items_get` (which bakes path noise into every client symbol,
+    # forever). CONSTRAINT: route function names must be unique across ALL routers.
+    return route.name
 
-    # Order: request_id (outermost) -> security/CORS/headers -> rate limit.
-    install_request_id(app)
-    install_security(app)
+
+def create_app() -> FastAPI:
+    app = FastAPI(
+        title="template_api",
+        version="0.0.0",
+        generate_unique_id_function=_operation_id,
+    )
+
+    # Starlette's add_middleware is LIFO: the LAST middleware added runs OUTERMOST.
+    # Intended onion (outer -> inner): request_id -> security headers/CORS -> rate limit —
+    # so even a 429 short-circuited by the rate limiter still carries X-Request-Id, the
+    # security headers, and the CORS allow-origin header (and CORS preflights carry
+    # X-Request-Id). The ADD order below is therefore the REVERSE of the onion.
     app.state.limiter = build_limiter()
-    app.add_middleware(SlowAPIMiddleware)
+    app.add_middleware(RateLimitMiddleware)   # innermost
+    install_security(app)                     # middle (CORS + security headers)
+    install_request_id(app)                   # added LAST -> OUTERMOST
 
     register_exception_handlers(app)
 
     @app.get("/healthz", response_model=Health, tags=["health"])
-    def healthz() -> Health:
+    def healthz() -> Health:  # pyright: ignore[reportUnusedFunction]
         return Health(status="ok")
 
     app.include_router(hello.router)
@@ -1277,9 +1395,13 @@ uv run uvicorn template_api.main:app --reload --port 8000   # or: pnpm --filter 
 ```
 
 **Why:** single composition root. `/healthz` is unauthenticated and rate-limit-light for
-the curl Verify and Fly health checks. Middleware order matters: request_id outermost so
-every response (including errors) echoes `X-Request-Id`; slowapi installed last so its 429
-is caught by the registered handler and rendered problem+json.
+the curl Verify and Fly health checks. **Middleware order matters and Starlette is LIFO** —
+an earlier draft added request_id FIRST (making it INNERMOST), so responses short-circuited
+by outer layers (rate limiter 429s, CORS preflights) carried NO `X-Request-Id` and no
+security headers; the add order above is the verified fix. `generate_unique_id_function` is
+what gives Phase 4's generated client clean hook names (`listItemsInfiniteOptions`, not
+`listItemsV1ItemsGetInfiniteOptions`) — without it the committed contract bakes FastAPI's
+default path-noise operationIds into every client symbol.
 
 ---
 
@@ -1289,17 +1411,35 @@ is caught by the registered handler and rendered problem+json.
 
 **Contents:**
 ```python
+"""Export the OpenAPI schema to products/_template/api/openapi.json.
+
+HERMETIC by design: needs NO database and NO api/.env — a clean CI checkout must be able
+to run it (Phase 8's drift check depends on this). template_api.main builds
+`app = create_app()` at module level and reads Settings immediately, so inert placeholder
+env is set BEFORE the import; the engine is NullPool and never connects.
+"""
+
 import json
+import os
 from pathlib import Path
 
-from .main import app
+# src/template_api/export_openapi.py -> parents[2] == the api/ root.
+# (parents[3] would be products/_template/ — one level too far.)
+OUTPUT = Path(__file__).resolve().parents[2] / "openapi.json"
 
-OUTPUT = Path(__file__).resolve().parents[3] / "openapi.json"  # products/_template/api/openapi.json
+_PLACEHOLDER = "postgresql+psycopg://placeholder:placeholder@localhost:5432/placeholder"
 
 
 def main() -> None:
+    os.environ.setdefault("DATABASE_URL", _PLACEHOLDER)
+    os.environ.setdefault("DATABASE_MIGRATION_URL", _PLACEHOLDER)
+    from template_api.main import app  # import AFTER the env exists (Settings reads at import)
+
     schema = app.openapi()
-    OUTPUT.write_text(json.dumps(schema, indent=2, sort_keys=True) + "\n")
+    OUTPUT.write_text(
+        json.dumps(schema, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
     print(f"wrote {OUTPUT}")
 
 
@@ -1313,12 +1453,13 @@ pnpm --filter @platform/template-api openapi   # or: uv run python -m template_a
 ```
 
 **Why:** writes `app.openapi()` JSON with **sorted keys** (stable diffs for the Phase 4
-drift check), **no running server needed**. The `openapi` turbo task (Step 1) declares this
-file as its output.
-
-> ⚠️ **OPEN / TO CONFIRM (output path):** `parents[3]` resolves
-> `src/template_api/export_openapi.py` → the `api/` root. Verify the depth matches the final
-> layout; Phase 4's `openapi-ts.config.ts` reads `../api/openapi.json`.
+drift check), **no running server needed, no DB, no `.env`** — a clean CI checkout (and the
+Phase 7 generator's post-stamp build) can run it. The `openapi` turbo task (Step 1) declares
+this file as its output. The output path is `parents[2]` (verified — an earlier `parents[3]`
+draft pointed one level too high); Phase 4's `openapi-ts.config.ts` reads
+`../api/openapi.json`. The committed `openapi.json` is **prettier-exempt** (root
+`.prettierignore`, Phase 1) — the generator owns its bytes; letting the format hook touch it
+breaks the Phase 4 regenerate-and-diff gate.
 
 ---
 
@@ -1349,11 +1490,12 @@ if __name__ == "__main__":
     main()
 ```
 
-`tasks.py`:
+`tasks.py` (the CLI subcommand name is `prune-push-tokens` — the Phase 8 DoD contract; a
+bare invocation prints usage and exits 2):
 ```python
 """Lightweight scheduled jobs run on Fly scheduled machines (no queue infra).
 
-Phase 8 wires the Fly scheduled machine that invokes `prune-stale-tokens`.
+Phase 8 wires the Fly scheduled machine that invokes `prune-push-tokens`.
 """
 
 import sys
@@ -1364,17 +1506,17 @@ from .db import get_engine
 from .services.push_service import PushService
 
 
-def prune_stale_tokens() -> None:
+def prune_push_tokens() -> None:
     with Session(get_engine()) as session:
         removed = PushService(session=session).prune_stale()
         print(f"pruned {removed} stale push tokens")
 
 
 def main(argv: list[str]) -> int:
-    if argv and argv[0] == "prune-stale-tokens":
-        prune_stale_tokens()
+    if argv and argv[0] == "prune-push-tokens":
+        prune_push_tokens()
         return 0
-    print("usage: python -m template_api.tasks prune-stale-tokens")
+    print("usage: python -m template_api.tasks prune-push-tokens")
     return 2
 
 
@@ -1385,14 +1527,15 @@ if __name__ == "__main__":
 **Commands:**
 ```bash
 pnpm --filter @platform/template-api seed
-uv run python -m template_api.tasks prune-stale-tokens
+uv run python -m template_api.tasks prune-push-tokens
 ```
 
 **Why:** `seed.py` is the per-product local dev data (Operational defaults). `tasks.py` is
 the lightweight `tasks` module run on **Fly scheduled machines** (Background/scheduled jobs
-bullet); the template ships the prune-stale-push-tokens example. Note `PushService(session=...)`
-can be constructed directly here because its `__init__` default is only a FastAPI `Depends`
-marker — outside a request we pass a real session.
+bullet); the template ships the prune-push-tokens example (90-day window — the Phase 8
+default; per-product tuning stays ⚠️ OPEN). Note `PushService(session=session)` is
+constructed directly here — the `Depends` lives in the Annotated type on `__init__`, so
+outside a request you simply pass a real session.
 
 ---
 
@@ -1407,7 +1550,9 @@ marker — outside a request we pass a real session.
 [alembic]
 script_location = alembic
 prepend_sys_path = src
-version_path_separator = os
+# `path_separator` (current key) — the old `version_path_separator` is deprecated and
+# warns on every alembic run.
+path_separator = os
 
 [loggers]
 keys = root,sqlalchemy,alembic
@@ -1693,7 +1838,18 @@ secrets**, never committed (Env/config bullet).
 **Files:** `products/_template/api/tests/__init__.py`,
 `products/_template/api/tests/conftest.py`, `.../tests/factories.py`.
 
-**Contents** — `conftest.py`:
+**Contents** — `tests/__init__.py` (NOT empty — it must export env defaults BEFORE any
+import touches `template_api.main`, which builds `app = create_app()` at module level and
+reads Settings immediately; `tests` is a package, so this runs before conftest's imports):
+```python
+import os
+
+_DEFAULT = "postgresql+psycopg://postgres:postgres@localhost:5432/postgres"
+os.environ.setdefault("DATABASE_URL", _DEFAULT)
+os.environ.setdefault("DATABASE_MIGRATION_URL", _DEFAULT)
+```
+
+`conftest.py`:
 ```python
 import os
 from collections.abc import Generator
@@ -1889,9 +2045,11 @@ def _request_with(token: str | None) -> Request:
 
 
 def _hs256_settings() -> Settings:
+    # Pass EVERY auth field explicitly — pydantic-settings reads api/.env for UNSET fields,
+    # so omitting one leaks the developer's local .env into a "hermetic" test.
     return Settings(
         database_url="postgresql+psycopg://x", database_migration_url="postgresql+psycopg://x",
-        supabase_url=None, supabase_jwt_secret=SECRET,
+        supabase_url=None, supabase_jwks_url=None, supabase_jwt_secret=SECRET,
     )  # pyright: ignore[reportCallIssue]
 
 
@@ -1982,14 +2140,25 @@ hit the real DB.
   SQLModel's `Session.exec()` is typed/designed for `select()` only — passing a `delete()` or
   `update()` statement is a **pyright-strict type error** (fastapi/sqlmodel #909) so Verify 7
   would fail, and the returned object wouldn't expose `.rowcount`. Use SQLAlchemy's
-  `self.session.execute(delete(...))` (already on `Session`, import nothing new); its `Result`
-  exposes `.rowcount` (`PushService.prune_stale`, and any future `update()` path). A plain
-  scalar-column `select(...)` via `.exec()` is fine — only `delete()`/`update()` are the issue.
-  (Key ruling DB conventions.)
-- **Service `__init__` default is a `Depends` marker, not a real session.** Inside a
-  request, FastAPI resolves `BaseService(session=Depends(get_session))`. Outside a request
-  (`seed.py`, `tasks.py`, tests constructing a service directly), pass a real `Session`
-  explicitly: `PushService(session=session)`.
+  `self.session.execute(delete(...))` — SQLModel *deprecates* `execute()` in favor of the very
+  `exec()` that can't type `delete()`, so the `# pyright: ignore[reportDeprecated]` plus
+  `cast("CursorResult[Any]", ...)` for `.rowcount` are DELIBERATE (`PushService.prune_stale`,
+  and any future `update()` path). A plain scalar-column `select(...)` via `.exec()` is fine —
+  only `delete()`/`update()` are the issue. (Key ruling DB conventions.)
+- **The `Depends` lives in the `Annotated` type, not in a default argument.** Inside a
+  request, FastAPI resolves `session: Annotated[Session, Depends(get_session)]` (the
+  `= Depends()` default form trips ruff B008). Outside a request (`seed.py`, `tasks.py`,
+  tests constructing a service directly), pass a real `Session` explicitly:
+  `PushService(session=session)`.
+- **slowapi's `SlowAPIMiddleware` is silently broken on current FastAPI — never reintroduce
+  it.** Its `route.matches(scope)` endpoint resolution returns `Match.NONE` for every route
+  under FastAPI 0.139's `_IncludedRouter` internals, so it exempts ALL requests and default
+  limits never fire (120 requests → 120×200 in the run that caught this). Use the thin
+  `RateLimitMiddleware` (Step 10) and re-verify slowapi-vs-FastAPI on every `/update`.
+- **Starlette `add_middleware` is LIFO — the last added is outermost.** Write the add order
+  as the REVERSE of the intended onion (Step 16), or short-circuited responses (429s,
+  CORS preflights) lose the outer layers' headers (`X-Request-Id`, security headers,
+  CORS allow-origin).
 - **`uv sync --frozen` requires a committed `uv.lock`.** The Dockerfile and CI use
   `--frozen`; run `uv sync` (without `--frozen`) once locally to generate/refresh
   `uv.lock`, and commit it. (Package management model — own `uv.lock` per api.)
@@ -2033,8 +2202,10 @@ Each maps to a DoD / PHILOSOPHY.md Verify item. Run from repo root unless noted.
    ```bash
    for i in $(seq 1 120); do curl -s -o /dev/null -w "%{http_code}\n" localhost:8000/v1/hello; done | sort | uniq -c
    ```
-   Expected: a run of `200` then `429` once the per-IP `100/minute` default is exceeded; the
-   429 body is `application/problem+json`.
+   Expected: exactly 100×`200` then `429`s once the per-IP `100/minute` default is exceeded;
+   the 429 body is `application/problem+json` AND (middleware-order proof) the 429 response
+   carries `X-Request-Id`, the security headers, and — for a browser-origin request — the
+   CORS allow-origin header.
 
 5. **CORS preflight from web origin (Verify 5).**
    ```bash
@@ -2117,8 +2288,10 @@ Suggested commit sequence on a feature branch (one phase = one or a few logical 
 - **Privileged/BYPASSRLS role — RESOLVED** — connect as the Supabase **`postgres`** role
   (`BYPASSRLS`, bypasses even `FORCE RLS`); ⚠️ REVIEW the exact credentials when the project
   exists, and add a read-after-deny-all integration test (Step 20).
-- **⚠️ export_openapi output path depth** (`parents[3]`) — verify against the final layout;
-  Phase 4 reads `../api/openapi.json` (Step 17). *(Out of domain for this review.)*
+- **export_openapi output path depth — RESOLVED** — `parents[2]` is correct
+  (`src/template_api/` → `api/`; `parents[3]` lands in `products/_template/`), and the
+  export is hermetic (placeholder env before import — Step 17). Phase 4 reads
+  `../api/openapi.json`.
 - **Test schema build — RESOLVED** — keep `SQLModel.metadata.create_all` for the test DB;
   add ONE test running `alembic upgrade head` + asserting `relrowsecurity` is true for
   `item`/`push_token`, since `create_all` skips the raw RLS statements (Step 23).
@@ -2128,6 +2301,6 @@ Suggested commit sequence on a feature branch (one phase = one or a few logical 
   local stack, the protected `/v1/me` end-to-end with sign-up.
 - **Deferred to Phase 8** — full structlog JSON logging + Sentry request_id tagging in
   `middleware.py`; the `send_push()` send path + realtime broadcast (service-role HTTP
-  call); the Fly scheduled machine invoking `tasks.py prune-stale-tokens`; CI Postgres
+  call); the Fly scheduled machine invoking `tasks.py prune-push-tokens`; CI Postgres
   service container wiring in `ci.yml`; `deploy-api.yml` Fly deploys.
 - **Deferred (PHILOSOPHY-level)** — ADRs vs ARCHITECTURE.md decision-record format.
