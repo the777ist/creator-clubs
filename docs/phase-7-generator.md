@@ -25,8 +25,9 @@ This is the concrete expansion of the PHILOSOPHY.md **Phase 7** row:
    ports (no collisions).
 4. **demo carries its own placeholder brand assets** (icon/splash/favicon under
    `products/demo/app/assets/brand/`, copied by the generator).
-5. **`git grep -iw template products/demo` returns empty** — no `template` token leaked
-   into the stamped product's contents or paths.
+5. **`git grep --untracked -iw template products/demo` returns empty** — no `template`
+   token leaked into the stamped product's contents or paths (`--untracked` so the check
+   means something on a freshly-stamped, not-yet-staged tree).
 
 This guide stays faithful to PHILOSOPHY.md's locked decisions: the **Multi-product** Decision
 Sheet bullet (`products/<name>/` consuming shared `packages/*`, `pnpm new-product <name>`,
@@ -115,9 +116,11 @@ token-pipeline config `tokens.config.json`, distinct from Code Connect's root
       `demo` stacks on offset ports without a redefinition in this phase.
 - [ ] `pnpm new-product demo` produces `products/demo` with `product.json`
       `{"name":"demo","portIndex":1}`.
-- [ ] **`git grep -iw template products/demo` returns empty** — no `template` token
-      survives in `demo` contents **or** paths (no `template_api` module dir, no
-      `template-*` package names, no `com.example.template`).
+- [ ] **`git grep --untracked -iw template products/demo` returns empty** — no `template`
+      token survives in `demo` contents **or** paths (no `template_api` module dir, no
+      `template-*` package names, no `com.example.template`), **and**
+      `git grep --untracked -F _template products/demo` is empty too (path self-references;
+      `--untracked` because plain `git grep` skips a freshly-stamped untracked tree).
 - [ ] **Both stacks coexist on offset ports:** `template` API `8000` / Supabase block
       `54321`; `demo` API `8010` / Supabase block `54421`. `pnpm bootstrap` brings both up
       with **no port collision**.
@@ -125,13 +128,18 @@ token-pipeline config `tokens.config.json`, distinct from Code Connect's root
       **both** products' graphs.
 - [ ] `products/demo/app/assets/brand/` carries demo's **own** placeholder assets (copied,
       not symlinked).
-- [ ] `tokens.config.json` gains a `"demo": "<placeholder-modeId>"` mode entry (Code
-      Connect's root `figma.config.json` is left untouched — it is not per-product).
+- [ ] `tokens.config.json` carries a `"demo": "TODO-MODE-ID-DEMO"` mode entry — Phase 2
+      pre-seeds it, the generator's add is an idempotent no-op for `demo` and adds the entry
+      for any new name (Code Connect's root `figma.config.json` is left untouched — it is
+      not per-product).
 - [ ] The generator **preserves placeholders** unchanged: org `example`,
-      `com.example.*`, `TODO-EAS-PROJECT-ID`, releases-repo owner placeholder. These are
-      *not* product tokens, so the whole-word replacement must not touch them.
-- [ ] Build artifacts are **not** copied (`node_modules`, `.venv`, `dist`, `.expo`,
-      `release`) — but `uv.lock` **is** kept.
+      `com.example.*`, `TODO-EAS-PROJECT-ID`, releases-repo owner placeholder,
+      `TODO-MODE-ID-*`. These are *not* product tokens, so the whole-word replacement must
+      not touch them.
+- [ ] Artifacts, caches, CLI state, logs and **local secrets** are **not** copied
+      (`node_modules`, `.venv`, `dist`, `.expo`, `release`, `.turbo`, `build`, `renderer`,
+      `__pycache__`, `.pytest_cache`, `.ruff_cache`, supabase `.temp`/`.branches`, `*.log`,
+      `.env`, `.env.local`) — but `uv.lock` **is** kept AND token-rewritten.
 
 ---
 
@@ -245,8 +253,19 @@ copies them + prints a replace checklist item**. Keeping `source.svg` as the onl
 file means a product re-brands by replacing one file and re-running `gen-brand.mjs`. The
 generator (Step 4) copies the whole `assets/brand/` tree verbatim, so the stamped product
 **carries its own** placeholder assets (Verify #4) that the team then replaces. The size
-matrix is the load-bearing contract; the rasterizer choice is an implementation detail left
-open. These outputs are committed (raster PNGs) so CI/build never needs the rasterizer.
+matrix is the load-bearing contract. These outputs are committed (raster PNGs) so CI/build
+never needs the rasterizer.
+
+> **Rasterizer (resolved): `sharp`, pinned exact (`0.35.3` in the 2026-07-05 run)** as an
+> app-workspace devDep. No `allowBuilds` entry is needed — the prebuilt `@img/sharp-*`
+> binaries ship as optional deps (no postinstall build).
+>
+> **`app.config.ts` gains its asset wiring HERE** — before this phase it has none. Add
+> `icon`, `android.adaptiveIcon`, `web.favicon`, and the `expo-splash-screen` plugin entry so
+> the size matrix above is literally "the exact set wired into app.config.ts".
+> Quirk: `expo install expo-splash-screen` "fails" BY DESIGN with a TS config — it installs
+> the package, then exits 1 with "Cannot automatically write to dynamic config at:
+> app.config.ts"; the plugin entry must be added by hand. Not a real failure.
 
 ---
 
@@ -307,9 +326,30 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const TEMPLATE_DIR = join(ROOT, "products", "_template");
 const PRODUCTS_DIR = join(ROOT, "products");
 
-// Directory/file names NOT to copy (build artifacts + local state). uv.lock is KEPT
-// (it lives at api root and is NOT in this list — Python lock must travel with the api).
-const SKIP = new Set(["node_modules", ".venv", "dist", ".expo", "release"]);
+// Directory/file names NOT to copy. uv.lock is KEPT (it lives at api root and is NOT in
+// this list — the Python lock must travel with the api). This set was written for a
+// PRISTINE checkout and then hardened for reality: a post-Phase-6 working tree also holds
+// caches, desktop build outputs, Supabase CLI state, and — critically — the SECRET-BEARING
+// api/.env from local dev, all of which must never be stamped into a new product.
+const SKIP = new Set([
+  // build artifacts / dependency dirs
+  "node_modules", ".venv", "dist", ".expo", "release",
+  // caches + desktop outputs
+  ".turbo", "build", "renderer",
+  // python caches
+  "__pycache__", ".pytest_cache", ".ruff_cache",
+  // supabase CLI runtime state
+  ".temp", ".branches",
+]);
+
+// Exact-name + pattern skips: local secrets and stray logs. Committed env files
+// (.env.example, .env.development/.staging/.production) still travel.
+function skipEntry(entry) {
+  if (SKIP.has(entry)) return true;
+  if (entry === ".env" || entry === ".env.local") return true; // LOCAL SECRETS — never copy
+  if (entry.endsWith(".log")) return true;                     // e.g. openapi-ts-error-*.log
+  return false;
+}
 
 // ---- Step 1: validate, refuse collisions, compute portIndex ----------------------------
 function parseArgs() {
@@ -347,14 +387,22 @@ function toSnake(kebab) {
 }
 
 // Whole-word replacements. ORDER MATTERS: replace the longest/most-specific token first
-// (`template_api` before `template`) so the snake module name is rewritten as a unit.
+// (`products/_template` before `template_api` before `template`) so composite tokens are
+// rewritten as a unit.
 // \b word boundaries ensure we never partial-match a word that merely CONTAINS "template"
 // (e.g. "templated", "templates", "templating") — those stay untouched.
+//
+// The FOURTH replacer exists because `_` is a word character: \btemplate\b can NEVER match
+// inside `_template`, so the template's own path self-references in comments
+// (`products/_template/api`, …) silently survive the three name variants — AND the headline
+// verify `git grep -iw template` uses the same word rules, so the stale paths would pass
+// verification undetected. Hence the explicit, first-ordered `products/_template` rule.
 function buildReplacers(name) {
   const kebab = name;                 // e.g. "demo"
   const Pascal = toPascal(name);      // e.g. "Demo"
   const snake = toSnake(name);        // e.g. "demo" (or "my_app" for "my-app")
   return [
+    [/products\/_template\b/g, `products/${kebab}`], // path self-references in comments/docs
     [/\btemplate_api\b/g, `${snake}_api`],   // Python module: template_api -> demo_api
     [/\bTemplate\b/g, Pascal],               // Pascal symbols/types
     [/\btemplate\b/g, kebab],                // kebab token: package names, slug, ids, fly, project_id
@@ -367,10 +415,30 @@ function rewrite(text, replacers) {
   return out;
 }
 
+// TOML guard: supabase config.toml's SCHEMA includes keys literally named `template`
+// (the [auth.sms]/[auth.mfa.phone] OTP message templates). The whole-word pass would
+// rewrite the config KEY itself and produce an invalid config ("'auth.sms' has invalid
+// keys: demo"). Mask `template =` keys before the token pass, restore after. (Phase 6
+// also deletes those default lines from the template's config.toml — this guard is the
+// generator-side backstop for any future CLI default that reintroduces one.)
+const TOML_KEY_MASK = " TOML_TEMPLATE_KEY ";
+function rewriteContents(path, text, replacers) {
+  if (path.endsWith(".toml")) {
+    const masked = text.replace(/^(\s*)template(\s*=)/gm, `$1${TOML_KEY_MASK}$2`);
+    return rewrite(masked, replacers).replaceAll(TOML_KEY_MASK, "template");
+  }
+  return rewrite(text, replacers);
+}
+
 // ---- Step 2 + 3: recursive copy with token replacement in CONTENTS and PATHS ------------
+// .lock is REQUIRED: uv.lock carries the project name (`name = "template-api"` in its
+// root-package entry) — classified binary it copies verbatim, and the stamped api's lock
+// then names a package its renamed pyproject.toml no longer declares (uv sync --frozen /
+// uv run fail). .sql (supabase migrations) and .mako (alembic script template) likewise.
 const TEXT_EXT = new Set([
   ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".json", ".md", ".py", ".toml", ".yml",
-  ".yaml", ".css", ".ini", ".cfg", ".txt", ".svg", ".env", "", // "" = dotfiles like .env.development
+  ".yaml", ".css", ".ini", ".cfg", ".txt", ".svg", ".env", ".lock", ".sql", ".mako",
+  "", // "" = dotfiles like .env.development
 ]);
 function isText(path) {
   const base = path.split(sep).pop();
@@ -383,7 +451,7 @@ function isText(path) {
 function copyTree(srcDir, destDir, replacers) {
   mkdirSync(destDir, { recursive: true });
   for (const entry of readdirSync(srcDir)) {
-    if (SKIP.has(entry)) continue;                   // build artifacts; uv.lock NOT here
+    if (skipEntry(entry)) continue;                  // artifacts/caches/secrets; uv.lock NOT skipped
     const src = join(srcDir, entry);
     const renamed = rewrite(entry, replacers);       // <-- token replacement in PATHS
     const dest = join(destDir, renamed);
@@ -391,7 +459,7 @@ function copyTree(srcDir, destDir, replacers) {
     if (st.isDirectory()) {
       copyTree(src, dest, replacers);
     } else if (isText(src)) {
-      writeFileSync(dest, rewrite(readFileSync(src, "utf8"), replacers)); // <-- in CONTENTS
+      writeFileSync(dest, rewriteContents(src, readFileSync(src, "utf8"), replacers)); // <-- in CONTENTS (TOML-key-guarded)
     } else {
       copyFileSync(src, dest);                        // binaries (PNG brand assets) verbatim
     }
@@ -406,11 +474,19 @@ function applyPorts(dest, i) {
   const sbBase = 54321 + 100 * i;        // api/studio/db/etc. offset as a block of 100
   const sbDelta = sbBase - 54321;        // amount to add to each default supabase port
 
-  // (a) supabase/config.toml — shift every default 543xx port by sbDelta.
+  // (a) supabase/config.toml — shift every default 543xx port by sbDelta, PLUS the
+  // [edge_runtime] inspector_port, which sits OUTSIDE the 543xx block (default 8083).
+  // It gets +10*i — can never collide with API ports 8000+10j, since 83 ≢ 0 (mod 10).
+  // (supabase start does not bind it on the host, but two products could otherwise never
+  // debug edge functions simultaneously via `functions serve --inspect`.)
   const cfg = join(dest, "supabase", "config.toml");
   if (existsSync(cfg)) {
-    const shifted = readFileSync(cfg, "utf8").replace(/\b(543\d\d)\b/g, (m) =>
+    let shifted = readFileSync(cfg, "utf8").replace(/\b(543\d\d)\b/g, (m) =>
       String(Number(m) + sbDelta)
+    );
+    shifted = shifted.replace(
+      /\binspector_port\s*=\s*(\d+)/g,
+      (_m, p) => `inspector_port = ${Number(p) + 10 * i}`
     );
     writeFileSync(cfg, shifted);
   }
@@ -441,7 +517,10 @@ function addFigmaMode(name) {
   if (!existsSync(f)) return;
   const cfg = JSON.parse(readFileSync(f, "utf8"));
   cfg.modes = cfg.modes || {};
-  if (!(name in cfg.modes)) cfg.modes[name] = "TODO-FIGMA-MODE-ID";  // placeholder until designer creates it
+  // Placeholder convention MUST match Phase 2's committed tokens.config.json:
+  // TODO-MODE-ID-<NAME-UPPERCASE> (e.g. TODO-MODE-ID-DEMO). Note Phase 2 pre-registers the
+  // `demo` mode, so for `demo` this add is an idempotent no-op — by design.
+  if (!(name in cfg.modes)) cfg.modes[name] = `TODO-MODE-ID-${name.toUpperCase()}`;
   writeFileSync(f, JSON.stringify(cfg, null, 2) + "\n");
 }
 
@@ -481,7 +560,7 @@ function printChecklist(name, portIndex) {
  [ ] BRAND: replace placeholder assets in products/${name}/app/assets/brand/source.svg
           then run: node products/${name}/app/assets/brand/gen-brand.mjs
  [ ] FIGMA: ask design to create the "${name}" brand mode, then replace the
-          TODO-FIGMA-MODE-ID in tokens.config.json and run /sync-tokens
+          TODO-MODE-ID-${name.toUpperCase()} placeholder in tokens.config.json and run /sync-tokens
 ────────────────────────────────────────────────────────────────────
 `);
 }
@@ -519,14 +598,18 @@ This is the literal implementation of PHILOSOPHY.md's **Generator** subsection, 
 1. **Validate `/^[a-z][a-z0-9-]*$/`, refuse collisions, `portIndex = max+1`** —
    `parseArgs()` + `nextPortIndex()`. It also reserves `template` and underscore-prefixed
    names (the template itself).
-2. **Copy `_template → products/<name>`, skip build artifacts, keep `uv.lock`** —
-   `copyTree()` honors the `SKIP` set (`node_modules/.venv/dist/.expo/release`); `uv.lock`
-   is deliberately **absent** from `SKIP`, so it travels (Package-management model: each
-   api carries its own lock).
+2. **Copy `_template → products/<name>`, skip artifacts/caches/SECRETS, keep `uv.lock`** —
+   `copyTree()` honors `skipEntry()` (build artifacts, `.turbo`, desktop `build/renderer`,
+   python caches, supabase `.temp/.branches` CLI state, `*.log`, and the secret-bearing
+   `.env`/`.env.local` that exist in a real post-Phase-3 working tree); `uv.lock`
+   is deliberately **kept** — and token-REWRITTEN (`.lock` is in `TEXT_EXT`), because its
+   root-package entry names the project (Package-management model: each api carries its own
+   lock; a verbatim copy breaks `uv sync --frozen`).
 3. **Whole-word replace in CONTENTS and PATHS** — `buildReplacers()` uses `\b`-anchored
    regexes and rewrites both the directory/file *name* (`rewrite(entry, …)`) and text-file
-   *contents*. `template_api` is replaced **before** `template` so the snake module name is
-   handled as a unit (e.g. `src/template_api/` → `src/demo_api/`).
+   *contents* (TOML-key-guarded via `rewriteContents`). Order: `products/_template` (path
+   self-references — `_` is a word char, so `\btemplate\b` can't reach them) →
+   `template_api` → `Template` → `template` (e.g. `src/template_api/` → `src/demo_api/`).
 4. **Port math `API=8000+10i`, Supabase block `54321+100i`** — `applyPorts()` shifts
    `config.toml` 543xx ports by the block delta, rewrites the api dev `--port`, and updates
    the committed `app/.env.*` (`EXPO_PUBLIC_API_URL` + supabase URL) so the two stacks
@@ -609,12 +692,19 @@ brand assets — with **zero** `template` tokens remaining (Verify #5).
 
 ## Gotchas & pitfalls
 
-- **Whole-word only — never partial-match.** The replacement uses `\b`-anchored regexes
-  (`/\btemplate\b/`, `/\bTemplate\b/`, `/\btemplate_api\b/`). Without word boundaries you
-  would corrupt any word that *contains* "template" — e.g. `templated`, `templates`,
-  `templating`, a CSS class, a comment, or a third-party identifier. PHILOSOPHY.md ruling #7 is
-  explicit: **whole-word**. Test by grepping the stamped product for the *stem* and
-  confirming only intended hits would have matched.
+- **Whole-word only — never partial-match — with two empirical corrections.** The
+  replacement uses `\b`-anchored regexes (`/\btemplate\b/`, `/\bTemplate\b/`,
+  `/\btemplate_api\b/`, `/products\/_template\b/`). Without word boundaries you would
+  corrupt any word that *contains* "template" (`templated`, `templates`, `templating`, a CSS
+  class, a third-party identifier). PHILOSOPHY.md ruling #7 is explicit: **whole-word**. But
+  whole-word is NOT automatically safe: (1) TOML config **keys** literally named `template`
+  ([auth.sms]/[auth.mfa.phone] OTP templates in supabase config) get rewritten into an
+  invalid config — hence the `rewriteContents` TOML-key mask (and Phase 6 deletes those
+  default lines); (2) `_` is a word character, so `\btemplate\b` never reaches
+  `products/_template` self-references — hence the fourth replacer. Accepted collateral
+  (per ruling #7): English prose gets rewritten too — ".env.example's "secrets template"" →
+  "secrets demo", "# Template for sending OTP" → "# Demo for sending OTP" — harmless,
+  documented tradeoff.
 
 - **Replace in PATHS, not just contents.** The most common generator bug is rewriting file
   *contents* but leaving directory/file *names* (`src/template_api/`,
@@ -626,15 +716,21 @@ brand assets — with **zero** `template` tokens remaining (Verify #5).
   `template` (kebab), or `template_api` becomes `<kebab>_api` with the wrong stem on hyphenated
   names. The generator's `buildReplacers` array is ordered for this reason.
 
-- **Keep `uv.lock` — do NOT delete it.** Each api is a self-contained uv project with its
-  own lock (Package-management model). `uv.lock` is *not* in the `SKIP` set, so it travels.
-  If it were skipped, the stamped api would float its Python deps and `uv sync --frozen`
-  (CI/Docker) would fail.
+- **Keep `uv.lock` — do NOT delete it, and DO token-rewrite it.** Each api is a
+  self-contained uv project with its own lock (Package-management model). `uv.lock` is *not*
+  skipped, so it travels — and `.lock` is in `TEXT_EXT` so its root-package entry
+  (`name = "template-api"`) is rewritten; copied verbatim, the stamped api's lock names a
+  package its renamed `pyproject.toml` no longer declares and `uv sync --frozen`/`uv run`
+  fail. Same reasoning puts `.sql` (migrations) and `.mako` (alembic template) in
+  `TEXT_EXT`.
 
-- **Skip build artifacts, not source.** `SKIP = {node_modules, .venv, dist, .expo,
-  release}`. Copying `node_modules`/`.venv` would be slow, huge, and wrong (they'd point at
-  the template's resolved paths). `dist`/`.expo`/`release` are regenerable outputs. Never
-  add `uv.lock` or `supabase/migrations` to this set.
+- **Skip artifacts, caches, CLI state AND local secrets — not source.** The skip set covers
+  `node_modules/.venv/dist/.expo/release`, plus `.turbo`, desktop `build/`+`renderer/`,
+  `__pycache__/.pytest_cache/.ruff_cache`, supabase `.temp/.branches`, `*.log`, and the
+  exact names `.env`/`.env.local`. The last two matter most: a real post-Phase-3 tree HAS an
+  `api/.env` with local secrets (the old "never exists in the template to copy" assumption
+  is false once local dev has run) — stamping it into a new product leaks secrets. Never
+  add `uv.lock` or `supabase/migrations` to the skip set.
 
 - **`portIndex` collisions.** `nextPortIndex()` scans **every** `products/*/product.json`
   and takes `max+1`. If you ever hand-create a product dir without a `product.json`, or
@@ -654,16 +750,33 @@ brand assets — with **zero** `template` tokens remaining (Verify #5).
   This is what keeps the scaffold portable (Naming conventions header).
 
 - **Preserve placeholders.** `example`, `com.example.*`, `TODO-EAS-PROJECT-ID`, the
-  releases-repo owner, and (new this phase) `TODO-FIGMA-MODE-ID` are intentional swap-points,
-  not product tokens. The `\btemplate\b` regex matches only the `template` segment inside
-  `com.example.template` (→ `com.example.<name>`), leaving `example` untouched. Verify with
-  `git grep -inE 'example|TODO' products/demo` — it should surface exactly the intended
-  swap-points and nothing else.
+  releases-repo owner, and the `TODO-MODE-ID-<NAME>` figma-mode placeholders are intentional
+  swap-points, not product tokens. The `\btemplate\b` regex matches only the `template`
+  segment inside `com.example.template` (→ `com.example.<name>`), leaving `example`
+  untouched. Verify with `git grep -inE 'example|TODO' products/demo` — it should surface
+  exactly the intended swap-points and nothing else.
 
 - **`.env.development/.staging/.production` are committed and must travel.** They're
   publishable-only (`EXPO_PUBLIC_*`) and gitignore allows them (Env/config). `copyTree`
   treats `.env*` as text (so tokens + ports are rewritten). The secret-bearing `.env` /
-  `.env.local` are gitignored and never exist in the template to copy.
+  `.env.local` are gitignored BUT do exist in a live working tree after local dev —
+  `skipEntry()` skips them by exact name.
+
+- **Template prose must never hardcode base ports.** The port pass only rewrites
+  `host:port` values — a comment like "API on 8000, Supabase on 54321" survives stamping
+  and then lies (demo actually runs on 8010). Write port prose in FORMULA form
+  ("API 8000+10i / Supabase 54321+100i, from product.json's portIndex") in `config.toml`
+  headers, `.env.*` comments, and product docs.
+
+- **Post-stamp builds depend on the HERMETIC openapi export (Phase 3).** The first
+  `turbo run build --affected` after stamping runs `@platform/<name>-api#openapi` in a tree
+  with no `api/.env` — if the export isn't hermetic (placeholder env before importing
+  `main`), it dies demanding `database_url`. This was a latent template defect stamping
+  exposed; it's fixed in the Phase 3/4 skeletons — don't regress it.
+
+- **Expo dev-server port is NOT offset — per spec.** The port math covers API + Supabase
+  only; both apps default to `--port 8081`. Expo auto-detects a busy port and offers 8082,
+  so simultaneous dev servers still work interactively.
 
 - **Binary assets copied verbatim.** The PNG brand outputs are not text — `copyTree` uses
   `copyFileSync` for non-text files so they aren't corrupted by a UTF-8 read/write. Only
@@ -691,13 +804,20 @@ Expected: prints the stamp log + infra checklist; `product.json` is
 
 **2. No `template` token leaked (the headline check)**
 ```bash
-git grep -iw template products/demo          # EXPECT: empty (no output, exit 1)
-find products/demo -iname '*template*'        # EXPECT: empty (paths rewritten too)
-git grep -inE 'example|TODO' products/demo    # EXPECT: only intended placeholders
+# --untracked is LOAD-BEARING: plain `git grep` only scans TRACKED files, and a freshly
+# stamped (untracked) tree trivially passes. (Staging first also works.)
+git grep --untracked -iw template products/demo   # EXPECT: empty (no output, exit 1)
+git grep --untracked -F _template products/demo   # EXPECT: empty (path self-references
+                                                  # rewritten — \b-grep can't see these)
+find products/demo -iname '*template*'            # EXPECT: empty (paths rewritten too)
+git grep --untracked -inE 'example|TODO' products/demo   # EXPECT: only intended placeholders
 ```
-Expected: the first two return nothing (token gone from contents **and** paths). The third
-surfaces exactly `example` org placeholders, `com.example.demo`, `TODO-EAS-PROJECT-ID`,
-releases-repo owner, `TODO-FIGMA-MODE-ID` — and nothing stray.
+Expected: the first three return nothing (token gone from contents **and** paths, including
+`products/_template/...` self-references in comments). The last surfaces exactly `example`
+org placeholders, `com.example.demo`, `TODO-EAS-PROJECT-ID`, releases-repo owner,
+`TODO-MODE-ID-DEMO` — and nothing stray. Also confirm the stamped supabase stack STARTS
+(`supabase start` in `products/demo`) — a corrupted `config.toml` (the TOML `template` key
+collision) fails here with `'auth.sms' has invalid keys`.
 
 **3. Both products build via `--affected`**
 ```bash
@@ -732,9 +852,24 @@ independently.
 **6. Figma mode registered**
 ```bash
 jq '.modes' tokens.config.json
-# EXPECT: { "template": "<modeId>", "demo": "TODO-FIGMA-MODE-ID" }
+# EXPECT: { "template": "TODO-MODE-ID-TEMPLATE", "demo": "TODO-MODE-ID-DEMO" }
+# NOTE: Phase 2 pre-registers the demo mode, so for `demo` the generator's add is an
+# idempotent no-op — the check is that the entry EXISTS with the Phase 2 naming convention.
 # (Code Connect's root figma.config.json is unchanged — it is not per-product.)
 ```
+
+**7. (Optional but recommended) hyphenated-name + portIndex-chaining probe**
+```bash
+pnpm new-product audit-probe
+```
+Exercises the paths a single-word `demo` stamp never touches — all verified working in the
+2026-07-05 audit: `nextPortIndex` reads demo's `product.json` → portIndex 2 (API 8020,
+Supabase block 54521, edge inspector 8103); kebab→snake module dir `src/audit_probe_api/`;
+`pyproject.toml` + rewritten `uv.lock` agree on `audit-probe-api` and **`uv run` actually
+syncs and executes** (openapi export runs); Pascal variant `AuditProbe` (electron
+productName, pyproject description); `TODO-MODE-ID-AUDIT-PROBE` registered; zero token
+leaks. Then remove the probe fully: delete the dir, revert the `tokens.config.json` entry
+and `pnpm-lock.yaml`, and re-run `pnpm install` — tree clean.
 
 ---
 
@@ -763,10 +898,12 @@ Suggested split on a `phase-7-generator` branch:
 
 ## Open questions / deferred
 
-- **Brand rasterizer: `sharp`.** `gen-brand.mjs` uses `sharp` (rasterize SVG source + resize
-  every PNG), added to the app workspace devDeps and pinned exact at install. The *size matrix*
-  (`icon` 1024 / `adaptive-icon` / `splash` / `favicon`) is the contract; align it with
-  whatever `app.config.ts` references (read it from Phase 2).
+- **Brand rasterizer: `sharp` — resolved.** `gen-brand.mjs` uses `sharp` (rasterize SVG
+  source + resize every PNG), added to the app workspace devDeps pinned exact (`0.35.3` in
+  the 2026-07-05 run); no `allowBuilds` entry needed (prebuilt `@img/sharp-*` binaries ship
+  as optional deps). The *size matrix* (`icon` 1024 / `adaptive-icon` / `splash` /
+  `favicon`) is the contract — and `app.config.ts` gains its asset wiring in this phase
+  (Step 2 note), so the matrix and the config are authored together.
 - **Exact splash/icon sizes & extra densities** — PHILOSOPHY.md says "all sizes" without
   enumerating them; the matrix above is this guide's concrete set. **⚠️ OPEN / TO CONFIRM**
   against `app.config.ts` + EAS requirements.
@@ -781,12 +918,14 @@ Suggested split on a `phase-7-generator` branch:
   ports at all (vs real hosts that the infra checklist later fills) is **⚠️ OPEN / TO
   CONFIRM**; this guide only offsets the local-host occurrences.
 - **Text-vs-binary classification** — `isText()` uses an extension allow-list. A new
-  template file type outside the list would be copied verbatim (no token replacement). Keep
-  `TEXT_EXT` in sync with the template's file types. **⚠️ OPEN / TO CONFIRM.**
-- **`tokens.config.json` shape** — this guide assumes `{ fileKey, modes: {...} }` (PHILOSOPHY.md
-  Figma-bridge note; the token-pipeline config, name-distinct from Code Connect's root
-  `figma.config.json`). If Phase 2 settled on the Tokens-Studio-JSON default (no `fileKey`),
-  the mode-registration key may differ. **⚠️ OPEN / TO CONFIRM** against Phase 2.
+  template file type outside the list would be copied verbatim (no token replacement) — this
+  exact failure mode already happened once with `uv.lock` (now in the list, with `.sql` and
+  `.mako`). Keep `TEXT_EXT` in sync with the template's file types; when adding a file type,
+  ask "does it ever carry the product token?". **⚠️ OPEN / TO CONFIRM at each new file type.**
+- **`tokens.config.json` shape — resolved.** Phase 2's committed shape is
+  `{ fileKey, source, tokensFile, modes, outputs }` with `modes` present and the placeholder
+  convention `TODO-MODE-ID-<NAME>`; `addFigmaMode` matches it, and Phase 2 pre-seeds the
+  `demo` entry (the generator's add is idempotent).
 - **`GH_TOKEN` vs per-product secret naming** in the checklist (`FLY_API_TOKEN_<NAME>`
   etc.) — exact secret names are owned by Phase 8 (CI/CD). The checklist here is the
   human prompt; the canonical names are **deferred to Phase 8**.

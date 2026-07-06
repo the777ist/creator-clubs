@@ -70,6 +70,14 @@ Issue counts: **✅ 13 verified · ⚠️ 6 caveats/incomplete · ❌ 1 wrong/ri
 - **Source(s):** https://docs.expo.dev/router/reference/typed-routes/
 
 ### 8. NativeWind v4 ↔ SDK 56 compatibility — UNCONFIRMED (the locked headline risk)
+
+> **ADDENDUM (2026-07-05, empirical — supersedes the ❌ status below for the pairing
+> question):** the Phase 2 build settled this gate WORKING: nativewind `4.2.6` +
+> react-native-css-interop `0.2.6` on expo `56.0.14` / RN `0.85.3` / React `19.2.3`
+> (New Arch, Hermes v1) — web export CSS carries the semantic-token utilities AND the
+> android export compiles the full NativeWind transform to a Hermes `.hbc` bundle. The SDK 54
+> safe harbor was never exercised. The fallback analysis below (SDK 54, never 55) remains
+> the policy for future SDK bumps.
 - **Location:** PHILOSOPHY.md "Frontend" (NativeWind v4; v5 pre-release — do NOT use); Phase 2 headline gotcha "Settles NativeWind v4 ↔ SDK 56 compat; fallback = SDK 55".
 - **Claim:** "NativeWind v4 (v5 is pre-release — do NOT use)" + "fallback = SDK 55".
 - **Status:** ❌ (the "v4 works on SDK 56" assumption is unverified; fallback target is also questionable)

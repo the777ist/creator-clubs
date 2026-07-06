@@ -103,6 +103,12 @@ the two ⚠️ matcher/transport notes before the harness is authored, then it i
 - **Source(s):** testing-library.com/docs/ecosystem-jest-native (deprecation notice);
   github.com/testing-library/jest-native; npmjs.com/package/@testing-library/react-native/v/12.4.4.
 
+> **ADDENDUM (2026-07-05, empirical):** on the installed RNTL **14.0.1** the
+> `/extend-expect` subpath is **REMOVED** — importing it fails jest startup ("cannot find
+> module"). The setup file must import the PACKAGE ROOT (`import
+> "@testing-library/react-native";`); matchers auto-register. The "keep extend-expect for
+> explicitness" advice above no longer applies on v14.
+
 ### 4. RNTL version compatibility with SDK 56 stack
 - **Location:** Phase 2 step (i) devDeps (`@testing-library/react-native`,
   `react-test-renderer` "pinned to the React version").
@@ -119,6 +125,11 @@ the two ⚠️ matcher/transport notes before the harness is authored, then it i
   deps explicitly require it. Confirm against the v14 install docs at execution time.
 - **Source(s):** npmjs.com/package/react-test-renderer (deprecated);
   github.com/callstack/react-native-testing-library/releases (v14 dropped RN 18 / renderer changes).
+
+> **ADDENDUM (2026-07-05, empirical):** RNTL 14 DOES require a renderer peer — the new
+> **`test-renderer`** package (1.2.0, the React-19 replacement for the deprecated
+> `react-test-renderer`); jest fails to run without it. Also: `jest` must stay pinned
+> **29.7.0** (jest-expo 56 is jest-29-based).
 
 ### 5. Frontend tests mock at the generated-client boundary
 - **Location:** PHILOSOPHY.md mocking conventions ("frontend tests mock at the generated-client

@@ -35,6 +35,11 @@ marked **⚠️ OPEN / TO CONFIRM**.
   `/healthz`, `/v1/hello`, and `/v1/items` CRUD with **cursor pagination**
   (`useInfiniteQuery`-ready), **RFC 9457 problem+json** errors typed into OpenAPI, and a
   `src/template_api/export_openapi.py` module. `pyright` is clean in strict mode.
+  **Crucially, Phase 3's `main.py` sets `generate_unique_id_function`** (returning
+  `route.name`) — that is what gives this phase clean operationIds (`list_items` →
+  `listItemsInfiniteOptions`). If the committed contract still carries FastAPI defaults
+  (`list_items_v1_items_get`), fix Phase 3 first, or path noise bakes into every client
+  symbol forever.
 - **Phase 2 complete** — `packages/core` ships `query.ts` (the TanStack Query client
   **with cache persistence** — AsyncStorage native / localStorage web) and `env.ts`; the
   `_template/app` shell (`@platform/template-app`) has tab navigation, NativeWind theming,
@@ -64,7 +69,7 @@ marked **⚠️ OPEN / TO CONFIRM**.
       bundled inside `@hey-api/openapi-ts`) **+ the TanStack Query plugin**, emitting
       `sdk` / `types` / TanStack hooks (`queryOptions`, `infiniteQueryOptions`) into `src/`.
 - [ ] `@hey-api/openapi-ts` is the **only** hey-api dependency (a devDep) and is **pinned
-      exact** (~0.98.x, pre-1.0). `@hey-api/client-fetch` is **not installed** — it is a
+      exact** (0.99.x, pre-1.0). `@hey-api/client-fetch` is **not installed** — it is a
       plugin identifier only.
 - [ ] The generated `src/` output is **committed**.
 - [ ] A package-level `api-client/turbo.json` declares `build` with
@@ -74,8 +79,9 @@ marked **⚠️ OPEN / TO CONFIRM**.
       dep edges.
 - [ ] `@platform/template-app` declares a `workspace:*` dependency on
       `@platform/template-api-client`.
-- [ ] `core/api.ts` sets the generated client `baseUrl` from `EXPO_PUBLIC_API_URL` at app
-      startup.
+- [ ] `core/api.ts` exposes `configureApiClient(client)` (injected — core NEVER imports a
+      product's generated client by name) and the app's `_layout.tsx` calls it with its own
+      generated `client` so `baseUrl` comes from `EXPO_PUBLIC_API_URL` at startup.
 - [ ] `features/home` renders `/v1/items` via the generated `useInfiniteQuery` hook with
       loading / error / empty states and infinite scroll; data is cache-persisted.
 - [ ] `app/(tabs)/index.tsx` is a **thin one-liner** re-exporting the home screen.
@@ -102,21 +108,28 @@ marked **⚠️ OPEN / TO CONFIRM**.
 PHILOSOPHY.md (Config essentials → export_openapi.py): writes app.openapi() JSON with sorted
 keys for stable diffs. This is the source the hey-api client is generated from, and the
 artifact the CI drift check compares.
+
+HERMETIC: template_api.main builds `app = create_app()` at import time and reads Settings
+immediately, so inert placeholder env is set BEFORE the import — a clean CI checkout (no
+api/.env, no DB) must be able to run this; the engine is NullPool and never connects.
 """
 
-from __future__ import annotations
-
 import json
+import os
 from pathlib import Path
-
-from template_api.main import app
 
 # openapi.json lives at the api workspace root: products/_template/api/openapi.json
 # __file__ = .../api/src/template_api/export_openapi.py  -> parents[2] = .../api
 OUTPUT = Path(__file__).resolve().parents[2] / "openapi.json"
 
+_PLACEHOLDER = "postgresql+psycopg://placeholder:placeholder@localhost:5432/placeholder"
+
 
 def main() -> None:
+    os.environ.setdefault("DATABASE_URL", _PLACEHOLDER)
+    os.environ.setdefault("DATABASE_MIGRATION_URL", _PLACEHOLDER)
+    from template_api.main import app  # import AFTER the env exists
+
     schema = app.openapi()
     # sort_keys=True => byte-stable diffs; trailing newline => clean git diff.
     OUTPUT.write_text(
@@ -139,10 +152,14 @@ cd products/_template/api && uv run python -m template_api.export_openapi
 **Why**
 PHILOSOPHY.md fixes `export_openapi.py` as "writes `app.openapi()` JSON, sorted keys (stable
 diffs), no server needed." Importing `app` and calling `app.openapi()` builds the schema
-in-process — no uvicorn, no port, no DB. `sort_keys=True` guarantees byte-stable output so
-the committed `openapi.json` and the generated client only change when the **contract**
-changes — which is exactly what the Contract testing row (`git diff --exit-code`) relies
-on. Deriving `OUTPUT` from `__file__` keeps it correct after the generator renames paths.
+in-process — no uvicorn, no port, no DB **and no `api/.env`** (Settings is satisfied by the
+inert placeholders; without them a clean CI checkout fails on `database_url` — a latent
+defect the Phase 7 generator's first post-stamp build exposed). `sort_keys=True` guarantees
+byte-stable output so the committed `openapi.json` and the generated client only change when
+the **contract** changes — which is exactly what the Contract testing row
+(`git diff --exit-code`) relies on. Deriving `OUTPUT` from `__file__` keeps it correct after
+the generator renames paths. The committed `openapi.json` is **prettier-exempt** (root
+`.prettierignore`) — the exporter owns its bytes.
 
 ---
 
@@ -188,6 +205,7 @@ Port `8000` here is the template's `portIndex=0` value; the generator rewrites i
 
 **Files**
 - `products/_template/api-client/package.json`
+- `products/_template/api-client/tsconfig.json`
 
 **Contents**
 ```json
@@ -207,14 +225,23 @@ Port `8000` here is the template's `portIndex=0` value; the generator rewrites i
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@tanstack/react-query": "catalog:"
+    "@tanstack/react-query": "5.101.2"
   },
   "devDependencies": {
-    "@hey-api/openapi-ts": "0.98.2",
+    "@hey-api/openapi-ts": "0.99.0",
     "@platform/template-api": "workspace:*",
     "@platform/config": "workspace:*",
-    "typescript": "catalog:"
+    "typescript": "5.9.3"
   }
+}
+```
+
+`tsconfig.json` (the `typecheck` script needs one — same preset `packages/core` uses;
+extends string is EXTENSIONLESS, per the Phase 2 exports-map rule):
+```json
+{
+  "extends": "@platform/config/tsconfig/expo",
+  "include": ["src"]
 }
 ```
 
@@ -227,12 +254,12 @@ Port `8000` here is the template's `portIndex=0` value; the generator rewrites i
 > a dependency pulls a deprecated, redundant package. `@hey-api/openapi-ts` is the **only**
 > hey-api dependency, lives in `devDependencies`, and is **pinned exact** (no `^`/`~`).
 >
-> **Version pin:** `0.98.2` is current latest (pre-1.0, June 2026) — refresh to the resolved
-> latest at install time and keep it exact (the README states the package is "in initial
-> development. Please pin an exact version"). openapi-ts requires **Node 22+** (a hard floor,
-> satisfied by the repo's Node 24 pin). `catalog:` assumes a pnpm catalog from Phase 1 for
-> shared TS/React Query (v5, ~5.101.x) versions — if no catalog exists, pin the same exact
-> version the app uses. ⚠️ REVIEW: confirm the catalog exists in Phase 1 before relying on it.
+> **Version pin:** `0.99.0` is the current latest (pre-1.0, 2026-07-05) — refresh to the
+> resolved latest at install time and keep it exact (the README states the package is "in
+> initial development. Please pin an exact version"). openapi-ts requires **Node 22+** (a
+> hard floor, satisfied by the repo's Node 24 pin). **No pnpm catalog exists in this repo**
+> (confirmed in the 2026-07-05 run) — pin `@tanstack/react-query` and `typescript` exact
+> inline, matching the app's versions (`5.101.2` / `5.9.3`).
 
 **Commands**
 ```bash
@@ -272,10 +299,16 @@ export default defineConfig({
   input: "../api/openapi.json",
   output: {
     path: "src",
-    format: "prettier", // keep generated output consistent with repo Prettier config
+    // 0.99: `format: "prettier"` is DEPRECATED — postProcess is the current knob.
+    postProcess: ["prettier"],
   },
   plugins: [
-    "@hey-api/client-fetch",
+    {
+      name: "@hey-api/client-fetch",
+      // 0.99: the barrel does NOT re-export the shared `client` by default — without this,
+      // `import { client } from "@platform/template-api-client"` fails (Step 8's caller).
+      exportFromIndex: true,
+    },
     "@hey-api/schemas",
     {
       name: "@hey-api/typescript",
@@ -288,13 +321,16 @@ export default defineConfig({
       name: "@tanstack/react-query",
       // Emits queryOptions + infiniteQueryOptions wrappers for cursor-paginated routes,
       // which features/home consumes via useInfiniteQuery.
+      // 0.99: same barrel rule — without exportFromIndex the generated TanStack options
+      // are not importable from the package root.
+      exportFromIndex: true,
     },
   ],
 });
 ```
 
-> **Plugin identifiers — confirmed current (June 2026).** The plugin string set is verified
-> against the openapi-ts source: client `@hey-api/client-fetch`; types `@hey-api/typescript`;
+> **Plugin identifiers — confirmed current (0.99.0, 2026-07-05).** The plugin string set is
+> verified: client `@hey-api/client-fetch`; types `@hey-api/typescript`;
 > SDK `@hey-api/sdk`; schemas `@hey-api/schemas` (optional — only needed for runtime
 > JSON-schema output; drop it to keep generated output smaller if you don't consume runtime
 > schemas); TanStack `@tanstack/react-query`. The TanStack plugin emits `queryOptions` and
@@ -302,10 +338,10 @@ export default defineConfig({
 > `{{name}}Options` and `{{name}}InfiniteOptions` (camelCase). Re-confirm only against the
 > exact pinned version if you bump it.
 >
-> **⚠️ OPEN / TO CONFIRM — cursor param name only.** The cursor query parameter that drives
-> `infiniteQueryOptions`' `getNextPageParam` is whatever `/v1/items` declares in Phase 3 —
-> the generated `getNextPageParam` keys off that **query parameter** name (not just the
-> response field), so confirm both against Phase 3's `schemas/` and route.
+> **Pagination boundaries are the CONSUMER's job (confirmed on 0.99.0).** The generated
+> `infiniteQueryOptions` emits **no `initialPageParam` and no `getNextPageParam`** — the
+> generated queryFn maps `pageParam` → the `cursor` query param, but the boundaries are
+> supplied at the call site (Step 9), including the `initialPageParam: ""` null-trap rule.
 
 **Commands**
 ```bash
@@ -317,8 +353,14 @@ git add products/_template/api-client/src                # commit generated outp
 This is the heart of the Contracts decision: FastAPI OpenAPI → `@hey-api/openapi-ts` +
 TanStack Query plugin, generated client committed per product. `input: "../api/openapi.json"`
 ties the client to its sibling api's emitted contract (matches the directory tree).
-`format: "prettier"` keeps generated diffs reviewable and consistent with the repo's
-Prettier config so the drift check only flags real contract changes.
+`postProcess: ["prettier"]` keeps generated diffs reviewable and consistent with the repo's
+Prettier config so the drift check only flags real contract changes — while the root
+`.prettierignore` keeps the pre-commit hook itself away from the committed `src/` (the
+generator owns those bytes; only its own postProcess pass formats them).
+
+> **Windows transient:** openapi-ts cleans its output (`rmSync` on `src/`) before writing —
+> if anything holds a handle on the dir (editor, watcher), that can hit a spurious `EPERM`;
+> a retry succeeds.
 
 ---
 
@@ -382,11 +424,6 @@ drop tasks added in earlier phases)
       "dependsOn": ["^build"],
       "outputs": ["dist/**"]
     },
-    "api-client#build": {
-      "dependsOn": ["^openapi", "^build"],
-      "inputs": ["openapi-ts.config.ts", "../api/openapi.json"],
-      "outputs": ["src/**"]
-    },
     "dev": {
       "cache": false,
       "persistent": true
@@ -395,12 +432,11 @@ drop tasks added in earlier phases)
 }
 ```
 
-> The `api-client#build` block above mirrors the package-level `turbo.json` from Step 5.
-> PHILOSOPHY.md describes the ordering "`api-client#build` runs openapi-ts ... **via
-> package-level turbo.json**", so the package-level file (Step 5) is authoritative; the
-> root `api-client#build` entry is optional belt-and-suspenders. Keep them **identical**
-> if you declare both, or rely solely on Step 5. **⚠️ OPEN / TO CONFIRM** which single
-> location the team standardizes on.
+> ✅ RESOLVED: `api-client#build` lives in the **package-level `turbo.json` ONLY** (Step 5)
+> — PHILOSOPHY.md's own wording ("via package-level turbo.json"). Do NOT duplicate it here;
+> two declarations invite silent divergence. In the 2026-07-05 run the root `turbo.json`
+> needed **zero changes** in this phase — Phase 3 already landed the `openapi` task with the
+> mandated Python inputs globs.
 
 **Commands**
 ```bash
@@ -432,7 +468,7 @@ edges, no hand-wired topology.
     "@platform/template-api-client": "workspace:*",
     "@platform/core": "workspace:*",
     "@platform/ui": "workspace:*",
-    "@tanstack/react-query": "catalog:"
+    "@tanstack/react-query": "5.101.2"
   }
 }
 ```
@@ -465,42 +501,46 @@ this one. It also makes the generated hooks importable from app code as
 // PHILOSOPHY.md (Config essentials → Typegen): "App sets client baseUrl from EXPO_PUBLIC_API_URL
 // at startup." packages/core (api.ts) is the client wrapper: baseUrl, auth header,
 // X-Request-Id injection. This phase wires baseUrl only.
-import { client } from "@platform/template-api-client";
+//
+// CORE MUST NEVER IMPORT A PRODUCT'S GENERATED CLIENT BY NAME. packages/core is SHARED and
+// never stamped — the "<product>" token in "@platform/<product>-api-client" cannot be
+// rewritten here. A hard import compiles fine but ships a latent cross-product bug: after
+// stamping, the new product's _layout.tsx would silently configure the TEMPLATE's client
+// singleton while its own hooks use its own, unconfigured client. The product INJECTS its
+// client instead (structural type — no workspace dependency).
 import { env } from "./env";
+
+/** Structural shape of the generated hey-api client — keeps core product-agnostic. */
+export type GeneratedApiClient = {
+  setConfig: (config: { baseUrl?: string }) => unknown;
+};
 
 let configured = false;
 
 /**
- * Configure the generated hey-api client once, at app startup, before any query runs.
- * Call from app/_layout.tsx (alongside the query + persist provider from Phase 2).
+ * Configure a product's generated hey-api client once, at app startup, before any query
+ * runs. Each product calls this from ITS OWN app/_layout.tsx with ITS OWN client:
+ *
+ *   import { client } from "@platform/template-api-client";
+ *   configureApiClient(client);
  */
-export function configureApiClient(): void {
+export function configureApiClient(client: GeneratedApiClient): void {
   if (configured) return;
-  client.setConfig({
-    baseUrl: env.EXPO_PUBLIC_API_URL,
-  });
+  client.setConfig({ baseUrl: env.apiUrl });
   configured = true;
 }
 ```
 
 > **Client symbol — confirmed.** The bundled Fetch client exports a shared `client` whose
-> `setConfig({ baseUrl })` is the documented startup pattern (verified in the client-fetch
-> bundle source); `baseUrl` is an optional field on its `Config`. (The same client exposes
-> `interceptors.request.use(...)` for the auth-header + `X-Request-Id` injection that lands
-> in Phases 6/8.) The only thing to confirm is the **import path** — whether the generated
-> barrel re-exports `client` from `@platform/template-api-client` directly or under a
-> `/client` subpath depends on the pinned version's output layout; read it from the
-> generated `src/index.ts` after Step 4. ⚠️ REVIEW: adjust the import above to match the
-> generated barrel.
+> `setConfig({ baseUrl })` is the documented startup pattern; `baseUrl` is an optional field
+> on its `Config`. (The same client exposes `interceptors.request.use(...)` for the
+> auth-header + `X-Request-Id` injection that lands in Phases 6/8.) On 0.99.0 the barrel
+> re-exports `client` from `@platform/template-api-client` **only with
+> `exportFromIndex: true`** on the client plugin (Step 4) — without it the import fails.
 >
-> **core ↔ client coupling seam (resolved for this phase).** In the template, `packages/core`
-> importing the **template-specific** generated client by name is the correct Phase 4 wiring
-> and matches PHILOSOPHY.md's `packages/core` tree (`api.ts` = the client wrapper: baseUrl, auth
-> header, X-Request-Id). `core` is "plumbing only" but is consumed as `workspace:*` source
-> per product, so name-importing the sibling client is acceptable here. The longer-term
-> injection shape (passing the client into `core` rather than importing it) is **not pinned
-> by PHILOSOPHY.md** and is **deferred** — flagged here so a future shared-`core` refactor knows
-> the seam exists; it is out of Phase 4 scope.
+> **`env` field naming:** Phase 2's `env.ts` exports `env.apiUrl` (reading
+> `EXPO_PUBLIC_API_URL`) — NOT `env.EXPO_PUBLIC_API_URL`. Read the actual export from
+> `packages/core/src/env.ts` (referenced, not rewritten, by this phase).
 
 **Commands**
 ```bash
@@ -552,11 +592,16 @@ export function HomeScreen() {
     hasNextPage,
     isFetchingNextPage,
   } = useInfiniteQuery({
-    // The generated infinite-options helper wires queryKey, queryFn, initialPageParam,
-    // and getNextPageParam from the OpenAPI cursor contract. If the generator does not
-    // emit getNextPageParam, supply it here off the response's next_cursor field
-    // (field name is ⚠️ OPEN / TO CONFIRM against Phase 3 schemas).
+    // The generated infinite-options helper wires queryKey + queryFn (mapping pageParam ->
+    // the `cursor` query param). It emits NO initialPageParam and NO getNextPageParam
+    // (confirmed on 0.99.0) — pagination boundaries are the consumer's job:
     ...listItemsInfiniteOptions(),
+    // TRAP: initialPageParam MUST be "" — NOT null. The generated queryFn branches on
+    // `typeof pageParam === "object"`, and `typeof null === "object"`, so null CRASHES at
+    // runtime. The api's decode_cursor treats empty string as "first page".
+    initialPageParam: "",
+    // next_cursor: null from the api means "no more pages" -> returning null stops fetching.
+    getNextPageParam: (lastPage) => lastPage.next_cursor ?? null,
   });
 
   if (isPending) {
@@ -621,9 +666,9 @@ export function HomeScreen() {
 
 > **Resolved & remaining flags:**
 > - **Generated hook name — confirmed.** `listItemsInfiniteOptions` is correct, verified
->   against the plugin's default `{{name}}InfiniteOptions` camelCase template. The only thing
->   to verify is the **operationId** (`list_items` → `listItems`) in Phase 3, not the plugin
->   naming. The non-infinite helper would be `listItemsOptions`.
+>   against the plugin's default `{{name}}InfiniteOptions` camelCase template AND against
+>   Phase 3's `generate_unique_id_function` (operationId = route name `list_items` →
+>   `listItems`). The non-infinite helper is `listItemsOptions`.
 > - **List component — use RN's built-in `FlatList`.** PHILOSOPHY.md's `features/home` tree says
 >   only "list screen via generated API hooks" and does **not** pin `@shopify/flash-list`,
 >   which is not listed anywhere in the Decision Sheet's dependency set. To avoid introducing
@@ -708,7 +753,7 @@ into `packages/*` later without dragging routing concerns along.
   silently. This is the single most common typegen-pipeline footgun.
 
 - **Pin `@hey-api/openapi-ts` EXACT (pre-1.0) — and do NOT install `@hey-api/client-fetch`.**
-  `@hey-api/openapi-ts` (~0.98.x) is pre-1.0; pin it exact (no `^`/`~`) — a patch bump can
+  `@hey-api/openapi-ts` (0.99.x) is pre-1.0; pin it exact (no `^`/`~`) — a patch bump can
   change generated output shape and produce a spurious drift diff for everyone. This matches
   the broader "pin pre-1.0 tools exactly" stance (also applied to `@rn-primitives/*`). The
   Fetch client is **bundled inside `@hey-api/openapi-ts` since 0.73.0**, so there is **no
@@ -762,12 +807,27 @@ type). A diff is present. Committing both keeps the contract green; **not** rege
 would leave a diff that fails the CI drift check.
 
 **3. Web renders paginated API data**
+
+> **`/v1/items` is auth-guarded (Phase 3, correct) and the app has NO login until Phase 6**
+> — the naive run below shows the error state, not items. The verified dev-token path
+> (verification-only; commit NOTHING from it):
+> 1. Mint an HS256 dev token against the api's `.env` fallback secret, `aud=authenticated`,
+>    `sub` = the seed owner id (`template_api.seed.SEED_OWNER`).
+> 2. Run a tiny local header-injecting proxy (`:8001` → `:8000`) that adds
+>    `Authorization: Bearer <token>` to every request.
+> 3. Point the app at the proxy via a **gitignored** `app/.env.local`
+>    (`EXPO_PUBLIC_API_URL=http://localhost:8001`).
+>
+> This exercises the full honest pipeline: list + cursor page 2 on scroll, the empty state
+> (mint a token with an ownerless `sub`), the error state (stop the api), and Verify #4's
+> instant cached paint (reload with the api down).
+
 ```bash
 # Terminal A — run the api (Phase 3), Supabase local up if required:
 pnpm --filter @platform/template-api run dev      # http://localhost:8000
 # seed some items so the list is non-empty:
 cd products/_template/api && uv run python -m template_api.seed && cd -
-# Terminal B — run the app on web:
+# Terminal B — run the app on web (with the dev-token proxy + .env.local above):
 pnpm --filter @platform/template-app exec expo start --web   # http://localhost:8081
 ```
 Expected: the home tab shows the items list fetched from `/v1/items`. Scrolling to the
@@ -821,10 +881,11 @@ Suggested split on a `phase-4-typegen` branch:
 
 ## Open questions / deferred
 
-- **Exact `@hey-api/openapi-ts` version** — `0.98.2` is current latest (pre-1.0); pin exact,
-  refreshing to the resolved latest at install time. `@hey-api/client-fetch` is **NOT
-  installed** (bundled into openapi-ts since 0.73.0; deprecated standalone package) — it is a
-  plugin string only. **Resolved.**
+- **Exact `@hey-api/openapi-ts` version** — `0.99.0` current (pre-1.0, 2026-07-05); pin
+  exact, refreshing to the resolved latest at install time (0.99 deltas folded in: `output.postProcess`
+  replaces the deprecated `format`, and `exportFromIndex: true` is required on the client +
+  TanStack plugins). `@hey-api/client-fetch` is **NOT installed** (bundled into openapi-ts
+  since 0.73.0; deprecated standalone package) — it is a plugin string only. **Resolved.**
 - **hey-api plugin identifier set & options** — confirmed current: client
   `@hey-api/client-fetch`, types `@hey-api/typescript`, SDK `@hey-api/sdk`, schemas
   (optional) `@hey-api/schemas`, TanStack `@tanstack/react-query`. `queryOptions` and
@@ -832,23 +893,26 @@ Suggested split on a `phase-4-typegen` branch:
   the officially recommended, production-used option but ships under the pre-1.0 openapi-ts
   umbrella — it is **not** separately "GA"; treat it as "stable, recommended, pre-1.0 — pin
   exact." **Resolved.**
-- **Cursor contract field names** (`items`, `next_cursor`, and the cursor **query param** —
-  the generated `getNextPageParam` keys off the query param, not just the response field) and
-  the `Item` DTO fields — defined by Phase 3's `schemas/`; match them. **⚠️ OPEN / TO
-  CONFIRM** (in-domain unverifiable — owned by Phase 3).
+- **Cursor contract field names — Resolved (verified against Phase 3):** response fields
+  `items` / `next_cursor`, query param `cursor`; `initialPageParam: ""` (empty = first page;
+  never `null` — the generated queryFn's `typeof pageParam === "object"` branch crashes on
+  it) and `getNextPageParam: (p) => p.next_cursor ?? null` supplied at the call site.
 - **List component** — uses RN's built-in `FlatList`; PHILOSOPHY.md does not pin
   `@shopify/flash-list` and it is absent from the Decision Sheet dependency set, so no new
   dependency is introduced. Swap to FlashList only if a product standardizes on it. **Resolved
   (FlatList).**
-- **`core/api.ts` ↔ template-client coupling** — name-importing the template-specific client
-  into `packages/core` is the correct Phase 4 wiring (matches PHILOSOPHY.md's `core` tree). The
-  injection seam for a future truly-shared `core` is unspecified by PHILOSOPHY.md and **deferred**
-  (out of Phase 4 scope).
-- **Single vs duplicated `api-client#build` declaration** (package-level `turbo.json`
-  alone vs also in root) — standardize on one. **⚠️ OPEN / TO CONFIRM.**
+- **`core/api.ts` ↔ product-client coupling — RESOLVED: injection, never a name import.**
+  `packages/core` is shared and never stamped, so `configureApiClient(client)` takes the
+  product's generated client (structural `GeneratedApiClient` type, no workspace dep). A
+  name import shipped a real latent bug once (a stamped product configuring the TEMPLATE's
+  client singleton) — the Phase 8 audit converted core to the injected form; this guide now
+  builds it that way from the start.
+- **Single vs duplicated `api-client#build` declaration — RESOLVED:** package-level
+  `turbo.json` ONLY (PHILOSOPHY's own wording); never duplicate it in the root file.
 - **Query persistence tuning** (`maxAge`, `gcTime`, dehydrate filters) lives in Phase 2's
   `query.ts`; not re-specified here. **Deferred to Phase 2.**
 - **Auth header + `X-Request-Id` injection** in `core/api.ts` — PHILOSOPHY.md assigns these to
   Phases 6 (auth) and 8 (observability), not Phase 4. **Deferred.**
-- **`pnpm catalog`** existence for shared TS/React Query versions assumed from Phase 1; if
-  absent, pin exact versions inline. **⚠️ OPEN / TO CONFIRM.**
+- **`pnpm catalog` — RESOLVED: no catalog exists** (confirmed 2026-07-05). Pin shared
+  TS/React Query versions exact inline everywhere (`@tanstack/react-query 5.101.2`,
+  `typescript 5.9.3`).

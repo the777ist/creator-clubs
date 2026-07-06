@@ -84,6 +84,11 @@ instructions**:
 - Be **autonomous**: proceed through reversible build work without asking. Stop only for a
   genuine conflict with the locked plan, a verification failure you cannot resolve, or a
   destructive/irreversible action.
+- **Non-interactive shells (you are one): prefix installs with `CI=1`** — `CI=1 pnpm install`.
+  pnpm 11 prompts interactively on some state changes (e.g. a modules-dir purge/rebuild after
+  an `allowBuilds` edit) and a non-TTY shell hangs forever waiting for the answer. This
+  applies in EVERY phase that runs or re-runs `pnpm install`. Similarly, invoke lefthook as
+  `pnpm lefthook …` (the workspace devDep is not on bare PATH in non-interactive shells).
 - For a large phase you may delegate **independent** build chunks to subagents — but **you**
   own the final verification and keep `PHILOSOPHY.md` + the phase guide as the single source of
   truth.

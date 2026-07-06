@@ -48,12 +48,12 @@ confirm:
    on all environments (including local)**, plus an **HS256 + `SUPABASE_JWT_SECRET` fallback**
    for older CLI / self-hosted symmetric secrets / manually-minted test tokens (Key ruling #5),
    `settings.py` (pydantic-settings),
-   problem+json error handlers, and a thin `routers/` pattern. Phase 6 **finalizes** the
-   protected `routers/me.py` and confirms the `auth.py` wiring against a real local token.
-   ⚠️ OPEN / TO CONFIRM — exactly how complete `auth.py`/`me.py` were left at the end of
-   Phase 3 (the Phase 3 guide does not yet exist under `docs/`). This guide writes the
-   **authoritative** versions; if Phase 3 already shipped them, reconcile rather than
-   duplicate.
+   problem+json error handlers, and a thin `routers/` pattern.
+   ✅ RESOLVED (2026-07-05): **Phase 3 is authoritative** — its guide ships `auth.py` (JWKS
+   primary + HS256 genuine fallback, `audience="authenticated"`), the `settings.py` auth
+   fields incl. the `supabase_jwks_url` override + `jwks_url` property, `routers/me.py`
+   (mounted), and `schemas/user.MeRead`, all matching Key ruling #5. Phase 6's api work is
+   **verification + test coverage**, not authorship (step 12).
 3. **Phase 4 done** — typegen pipeline works; `features/home` renders `/v1/items` via the
    generated TanStack hook, and the API client wrapper (`core/api.ts`) sets `baseUrl` from
    `EXPO_PUBLIC_API_URL` at startup. This phase makes that wrapper attach the **bearer token**.
@@ -74,13 +74,14 @@ confirm:
 - [ ] `supabase start` brings the stack up cleanly; `supabase status` prints the API URL,
       anon key, and JWT secret for the local stack.
 - [ ] `@platform/core` exports, from `src/index.ts`: `supabase` client factory (`supabase.ts`),
-      the session store + guards (`auth.ts`), and the upload helper (`storage.ts`).
+      the session store + guards (`auth.tsx`), and the upload helper (`storage.ts`).
 - [ ] `core/supabase.ts` creates the client from `EXPO_PUBLIC_SUPABASE_URL` +
       `EXPO_PUBLIC_SUPABASE_ANON_KEY` with a **platform-correct storage adapter**
       (AsyncStorage native / `localStorage` web) and `autoRefreshToken`/`persistSession` on.
-- [ ] `core/auth.ts` exposes a **Zustand** session store wired to `onAuthStateChange`,
-      `signIn`/`signUp`/`signOut`, a `useSession()` hook (with `loading` state), and the
-      route-guard hooks (`useProtectedRoute` / `useRequireAuth`) used by the route groups.
+- [ ] `core/auth.tsx` exposes a **Zustand** session store wired to `onAuthStateChange`,
+      `signIn`/`signUp`/`signOut`, a `useSession()` hook (with `loading` state, selector
+      wrapped in `useShallow`), and BOTH route-guard hooks — `useProtectedRoute` (group
+      layout) and `useRequireAuth` (single screen) — exported from `index.ts`.
 - [ ] `core/storage.ts` exposes a **direct-to-Storage** upload helper (`uploadAvatar`) using
       `supabase.storage.from(...).upload(...)` and returning a public **or** signed URL.
 - [ ] `app/features/auth/` has **`login.tsx` + `signup.tsx`** built on `@platform/ui`
@@ -143,8 +144,8 @@ port = 54329
 enabled = true
 port = 54323
 
-[inbucket]               # local email testing (signup confirmation links land here)
-enabled = true
+[local_smtp]             # local email testing (Mailpit; signup confirmation links land here)
+enabled = true           # NOTE: CLI ≥ 2.109 renamed the old [inbucket] section to [local_smtp]
 port = 54324
 
 [storage]
@@ -191,7 +192,7 @@ supabase status --workdir products/_template         # prints API URL, anon key,
 multiple products' stacks coexist (`pnpm bootstrap` runs them together — Phase 7). `project_id`
 is keyed to the **product** (`example-template`), never the monorepo name, keeping the scaffold
 portable. `enable_confirmations = false` is a **local-only** convenience so signup → login is
-testable without the Inbucket email step; the hosted projects enforce confirmation. The
+testable without the local-SMTP (Mailpit) email step; the hosted projects enforce confirmation. The
 current CLI (≥ v2.71.1) signs **local** tokens with **asymmetric ES256** by default — the same
 as new hosted projects — so the API verifies them through **JWKS** locally too (point
 `SUPABASE_URL` at `http://localhost:54321`; Key ruling #5). The JWT secret printed by
@@ -199,13 +200,32 @@ as new hosted projects — so the API verifies them through **JWKS** locally too
 symmetric secret / manually-minted test tokens), which is **not** the local happy path on a
 current CLI.
 
-> **Resolved (was OPEN — `config.toml` key set + local JWT algorithm).** The table structure
-> above matches the current CLI config reference; the canonical procedure is to run
-> `supabase init` once to materialize the installed version's default `config.toml`, then apply
-> the offsets + `project_id`. Because the current CLI defaults the local stack to **ES256**, do
-> **not** assume HS256: either accept ES256 and let the JWKS branch verify locally (the default
-> here), or pin HS256 deliberately via the signing-keys mechanism shown in the `[auth]` block
-> above. Confirm `major_version = 17` matches the Postgres bundled with the pinned CLI version.
+> **Resolved (was OPEN — `config.toml` key set + local JWT algorithm). The canonical
+> procedure is INIT-THEN-DELTA, not copying the skeleton above:** run `supabase init` once to
+> materialize the installed CLI's default `config.toml`, then apply ONLY the deltas —
+> `project_id`, auth site/redirect URLs (incl. `app://-/`), the ES256 signing comment,
+> `analytics.enabled = false`. Observations from CLI 2.109 (2026-07-05 run): `[inbucket]` no
+> longer exists (it is `[local_smtp]`, same port 54324); new sections appear
+> (`[db.migrations]`, `[storage.s3_protocol]`, `[edge_runtime]`, `[experimental.pgdelta]`);
+> `major_version = 17` is the generated default (confirmed).
+> **Two deltas are mandatory for the Phase 7 generator:**
+> 1. **DELETE the default `template = "…"` lines** in the disabled `[auth.sms]` /
+>    `[auth.mfa.phone]` sections (the CLI falls back to its defaults). `template` is a config
+>    SCHEMA key there — the generator's whole-word `\btemplate\b` replace would corrupt it
+>    into an invalid config (`'auth.sms' has invalid keys: <name>`), and the stamped-product
+>    verify grep (`git grep -iw template`) could never come up empty with the keys present.
+> 2. **`[edge_runtime] inspector_port = 8083` sits OUTSIDE the 543xx port block** — the
+>    generator's `+100·portIndex` rule does not touch it; Phase 7 shifts it by
+>    `+10·portIndex` (or disable edge_runtime) so simultaneous product stacks can both debug
+>    functions.
+> Because the current CLI defaults the local stack to **ES256**, do **not** assume HS256:
+> either accept ES256 and let the JWKS branch verify locally (the default here), or pin HS256
+> deliberately via the signing-keys mechanism shown in the `[auth]` block above.
+>
+> **Prettier note:** `supabase init` also writes a NESTED `supabase/.gitignore` for its
+> runtime artifacts (`.temp/`, `.branches/`) — Prettier 3 only reads the ROOT
+> `.gitignore`/`.prettierignore`, so those paths live in the root `.prettierignore`
+> (Phase 1 Step 8); otherwise `format:check` fails on CLI runtime state.
 
 ---
 
@@ -219,9 +239,11 @@ current CLI.
   // ...
   "dependencies": {
     "@supabase/supabase-js": "PLACEHOLDER-pin-exact",
-    "@react-native-async-storage/async-storage": "PLACEHOLDER-pin-exact",
-    "zustand": "PLACEHOLDER-pin-exact"
+    "@react-native-async-storage/async-storage": "2.2.0",
+    "zustand": "5.0.14"
     // ...existing: tanstack query, persist client, env, etc.
+    // async-storage 2.2.0 = the SDK 56 pairing (npm-latest 3.1.x is NOT it — Phase 2 note);
+    // zustand 5.0.14 matches the app's pin.
   }
 }
 ```
@@ -252,7 +274,7 @@ let _client: SupabaseClient | null = null;
 
 export function getSupabase(): SupabaseClient {
   if (_client) return _client;
-  _client = createClient(env.SUPABASE_URL, env.SUPABASE_ANON_KEY, {
+  _client = createClient(env.supabaseUrl, env.supabaseAnonKey, {
     auth: {
       storage: authStorage as never,
       autoRefreshToken: true,
@@ -281,7 +303,9 @@ committed env file because RLS (deny-all by default, Key ruling on DB convention
 
 **Files:** `packages/core/src/env.ts` (extend the existing module).
 
-**Contents:**
+**Contents** — KEEP Phase 2's committed accessor shape (**camelCase**: `env.apiUrl`,
+`env.supabaseUrl`, `env.supabaseAnonKey` — Phase 4 already reads `env.apiUrl`; do NOT
+rewrite the module to a different naming scheme):
 ```ts
 // packages/core/src/env.ts  (additions — the module already exists from Phase 2)
 //
@@ -293,9 +317,9 @@ function required(name: string, value: string | undefined): string {
 }
 
 export const env = {
-  API_URL: required("EXPO_PUBLIC_API_URL", process.env.EXPO_PUBLIC_API_URL),
-  SUPABASE_URL: required("EXPO_PUBLIC_SUPABASE_URL", process.env.EXPO_PUBLIC_SUPABASE_URL),
-  SUPABASE_ANON_KEY: required(
+  apiUrl: required("EXPO_PUBLIC_API_URL", process.env.EXPO_PUBLIC_API_URL),
+  supabaseUrl: required("EXPO_PUBLIC_SUPABASE_URL", process.env.EXPO_PUBLIC_SUPABASE_URL),
+  supabaseAnonKey: required(
     "EXPO_PUBLIC_SUPABASE_ANON_KEY",
     process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY,
   ),
@@ -304,19 +328,23 @@ export const env = {
 
 **Why:** Centralizes the publishable config + fails fast with a clear message if an
 `.env.<profile>` file is missing a var. Keeps `supabase.ts` and `api.ts` free of raw
-`process.env` reads.
+`process.env` reads. The camelCase field names are Phase 2's committed contract — a run
+that introduced `env.EXPO_PUBLIC_API_URL`-style names here broke Phase 4's `env.apiUrl`
+reader; extend the shape, never rename it.
 
 ---
 
-### 4. `@platform/core` auth session store + guards (`auth.ts`)
+### 4. `@platform/core` auth session store + guards (`auth.tsx`)
 
-**Files:** `packages/core/src/auth.ts`.
+**Files:** `packages/core/src/auth.tsx` — **`.tsx`, not `.ts`**: the `AuthProvider` below
+returns JSX (`<>{children}</>`) and `tsc` refuses JSX in a `.ts` file.
 
 **Contents:**
-```ts
-// packages/core/src/auth.ts
+```tsx
+// packages/core/src/auth.tsx  (.tsx — AuthProvider returns JSX)
 import { useEffect } from "react";
 import { create } from "zustand";
+import { useShallow } from "zustand/react/shallow";
 import { useRouter, useSegments } from "expo-router";
 import type { Session, User } from "@supabase/supabase-js";
 import { getSupabase } from "./supabase";
@@ -355,9 +383,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   return <>{children}</>;
 }
 
-/** Read-only session accessor for screens. */
+/** Read-only session accessor for screens.
+ *
+ * useShallow is REQUIRED under zustand v5: an object-returning selector creates a fresh
+ * object every call, v5's useSyncExternalStore compares snapshots with Object.is → always
+ * unequal → "getSnapshot should be cached" + an infinite re-render loop. (v4's deprecated
+ * shallow-equality overload is gone.)
+ */
 export function useSession() {
-  return useSessionStore((s) => ({ session: s.session, user: s.user, loading: s.loading }));
+  return useSessionStore(
+    useShallow((s) => ({ session: s.session, user: s.user, loading: s.loading })),
+  );
 }
 
 export function getAccessToken(): string | null {
@@ -405,6 +441,23 @@ export function useProtectedRoute() {
   }, [session, loading, segments, router]);
 
   return { loading };
+}
+
+/**
+ * Screen-level guard variant (the DoD names both hooks): protects a SINGLE screen rather
+ * than a route group — redirects to login when signed out, returns the session for the
+ * screen to use. Same loading gate as useProtectedRoute.
+ */
+export function useRequireAuth() {
+  const { session, loading } = useSession();
+  const router = useRouter();
+
+  useEffect(() => {
+    if (loading) return;
+    if (!session) router.replace("/(auth)/login");
+  }, [session, loading, router]);
+
+  return { session, loading };
 }
 ```
 
@@ -562,7 +615,7 @@ export function LoginScreen() {
         />
         {error ? <Text className="text-destructive">{error}</Text> : null}
         <Button onPress={onSubmit} disabled={busy}>
-          <Text>{busy ? "Signing in…" : "Sign in"}</Text>
+          {busy ? "Signing in…" : "Sign in"}
         </Button>
         <Link href="/(auth)/signup" className="text-primary text-center">
           No account? Sign up
@@ -573,10 +626,18 @@ export function LoginScreen() {
 }
 ```
 
+> **Button children are PLAIN STRINGS, never `<Text>`-wrapped.** The Phase 2 `Button` styles
+> string children with `buttonTextVariants` (per-variant contrast, e.g.
+> `text-primary-foreground` on `bg-primary`); wrapping the label in your own `<Text>`
+> bypasses that and renders default `text-foreground` — an unreadable label on dark variants.
+> Applies to every Button in this phase (login, signup, avatar uploader).
+
 **Commands:**
 ```bash
-# image-picker dep is needed by the settings avatar demo (step 10) but is an app dep:
-pnpm --filter @platform/template-app add expo-image-picker
+# image-picker dep is needed by the settings avatar demo (step 10) but is an app dep.
+# Use expo install so the version pairs with the SDK (~56.0.19 on SDK 56); keep the
+# expo-conventional tilde range — expo-* deps are SDK-coupled, not pre-1.0.
+pnpm --filter @platform/template-app exec expo install expo-image-picker
 ```
 
 **Why:** Per **Key ruling #9 (rich-starter inheritance)**, every stamped product **copies** a
@@ -753,7 +814,9 @@ export function AvatarUploader() {
   async function onPick() {
     if (!user) return;
     const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      // MediaType ARRAY form — the old ImagePicker.MediaTypeOptions.Images enum is
+      // deprecated in expo-image-picker ~56.
+      mediaTypes: ["images"],
       quality: 0.7,
     });
     if (result.canceled) return;
@@ -784,7 +847,7 @@ export function AvatarUploader() {
       )}
       {error ? <Text className="text-destructive">{error}</Text> : null}
       <Button onPress={onPick} disabled={busy}>
-        <Text>{busy ? "Uploading…" : "Upload avatar"}</Text>
+        {busy ? "Uploading…" : "Upload avatar"}
       </Button>
     </View>
   );
@@ -805,7 +868,10 @@ gitignored).
 **Contents** (local-stack values — fill anon key from `supabase status`):
 ```bash
 # products/_template/app/.env.development  (COMMITTED — publishable only, NO secrets)
-EXPO_PUBLIC_API_URL=http://localhost:8000/v1
+# API URL is ORIGIN-ONLY (no /v1): the generated client's operation paths already include
+# /v1 (FastAPI routers use prefix="/v1") — a /v1 suffix here would double the prefix and
+# every request would hit /v1/v1/items.
+EXPO_PUBLIC_API_URL=http://localhost:8000
 EXPO_PUBLIC_SUPABASE_URL=http://localhost:54321
 EXPO_PUBLIC_SUPABASE_ANON_KEY=<anon-key-from-`supabase status`>
 ```
@@ -818,12 +884,31 @@ rewrites these ports per `portIndex` for stamped products (generator step 4). `.
 
 ---
 
-### 12. API — finalize protected `/v1/me`, `auth.py`, `settings.py`
+### 12. API — verify the protected `/v1/me`, `auth.py`, `settings.py` (Phase 3 is authoritative)
+
+> **RECONCILIATION RULING (from the 2026-07-05 run):** Phase 3 already ships all of this —
+> `auth.py` (JWKS primary via the `settings.jwks_url` property, HS256 genuine fallback,
+> `audience="authenticated"`, `CurrentUser`), `settings.py` (incl. the `supabase_jwks_url`
+> per-env override), `routers/me.py` (mounted), `schemas/user.MeRead`. **KEEP Phase 3's
+> shape** — the skeletons below are a reference for reconciliation only; where they differ
+> from Phase 3's shipped code (file/DTO names like `schemas/user.MeRead` vs `schemas/me.MeOut`,
+> the module-level vs `get_settings()` style), Phase 3 wins. Phase 6's actual api work:
+> 1. Point `api/.env` at the local stack (`SUPABASE_URL=http://localhost:54321`; leave
+>    `SUPABASE_JWT_SECRET` unset — current CLI issues ES256).
+> 2. Add the missing test coverage: missing-`aud` → 401, an ES256/JWKS-path unit test
+>    (stubbed JWK set — matches what the live local stack emits), `/v1/me` HTTP round-trips
+>    (valid HS256 fallback token → 200; bad token → problem+json 401; missing header → 401),
+>    and a hermetic `jwks_url` derivation/override/none test (pass EVERY auth field
+>    explicitly — pydantic-settings reads `api/.env` for unset fields).
+> 3. Verify LIVE: fresh password-grant token has header `alg: ES256`; `/v1/me` 200s with
+>    **no** `SUPABASE_JWT_SECRET` set (pure JWKS); `SUPABASE_JWKS_URL=` documented in
+>    `.env.example`.
 
 **Files:** `products/_template/api/src/template_api/auth.py`,
 `products/_template/api/src/template_api/settings.py`,
 `products/_template/api/src/template_api/routers/me.py`,
-`products/_template/api/src/template_api/schemas/me.py`.
+`products/_template/api/src/template_api/schemas/user.py` (Phase 3's name — the `me.py`
+DTO module below is the pre-reconciliation shape).
 
 **Contents** (`settings.py` — auth-relevant fields; the module exists from Phase 3):
 ```python
@@ -990,8 +1075,9 @@ thin dependency Phase 3 promised; `routers/me.py` stays a one-liner reading veri
 no DB round-trip, no ORM leakage (DTO `MeOut` only). Mount the router in `main.py` if Phase 3
 didn't.
 
-> ⚠️ OPEN / TO CONFIRM — Phase 3's exact `problem()` signature/`errors.py` API and whether the
-> `me` router was already mounted. The above assumes the Phase 3 problem+json helper; reconcile.
+> ✅ RESOLVED — Phase 3's `errors.py` uses `ProblemException` (not a bare `problem()`
+> helper) and the `me` router IS already mounted; the reconciliation ruling at the top of
+> this step applies — keep Phase 3's shapes.
 
 ---
 
@@ -1050,8 +1136,10 @@ supabase start --workdir products/_template
 supabase status --workdir products/_template
 ```
 **Expected:** Stack boots; `status` prints `API URL: http://localhost:54321`, an **anon key**,
-and a **JWT secret**. Paste the anon key into `app/.env.development` and the JWT secret into the
-api `.env`. Studio reachable at `http://localhost:54323`.
+and a **JWT secret**. Paste the anon key into `app/.env.development`. The JWT secret is NOT
+needed on a current CLI (local tokens are ES256, verified via JWKS — proven live with no
+`SUPABASE_JWT_SECRET` set); only set it in the api `.env` when deliberately exercising the
+HS256 fallback. Studio reachable at `http://localhost:54323`.
 
 ### V2 — sign up through the template's login screen
 ```bash
@@ -1104,11 +1192,12 @@ turbo run typecheck test lint --affected
 ```
 **Expected:** Green for `@platform/core`, `@platform/template-app`, `@platform/template-api`.
 API tests include `test_auth.py` (JWT paths: a minted HS256 token exercising the fallback
-branch, bad token → 401, missing aud → 401) and a `/v1/me` router round-trip over the real
-local Postgres (per the testing strategy). Note: the HS256 tests mint tokens directly so they
-pass on their own merits, but they **no longer represent what the live local stack emits** —
-the running CLI issues ES256, verified via the JWKS branch. Add an ES256/JWKS-path test if you
-want coverage matching the live local token (e.g. against the local JWKS or a mocked JWK set).
+branch, bad token → 401, missing aud → 401, **an ES256/JWKS-path unit test with a stubbed
+JWK set** — this is the coverage that matches what the live local stack emits — and a
+hermetic `jwks_url` derivation/override/none test) plus `/v1/me` HTTP round-trips over the
+real local Postgres (valid token → 200, bad token → problem+json 401, missing header → 401).
+The HS256 tests stay valid (they verify the fallback logic itself) but the live local happy
+path is ES256 → JWKS — verified in the run with NO `SUPABASE_JWT_SECRET` set.
 
 ---
 
@@ -1141,17 +1230,20 @@ broadcast pattern, push loop, or CI workflows here — those are Phase 8.
 
 ## Open questions / deferred
 
-- ⚠️ OPEN / TO CONFIRM — **exact pinned versions** of `@supabase/supabase-js`,
-  `@react-native-async-storage/async-storage`, `zustand`, `expo-image-picker`, `pyjwt[crypto]`.
-  PHILOSOPHY.md pins no majors; pick current stable, pin exact (`PLACEHOLDER-pin-exact` markers).
+- ⚠️ OPEN / TO CONFIRM — **exact pinned version** of `@supabase/supabase-js` (and
+  `pyjwt[crypto]`, uv-locked): pick current stable at install, pin exact. Known from the
+  2026-07-05 run: `@react-native-async-storage/async-storage 2.2.0` (SDK 56 pairing),
+  `zustand 5.0.14`, `expo-image-picker ~56.0.19` (tilde kept — expo-* deps are SDK-coupled,
+  installed via `expo install`).
 - **Resolved — avatars bucket public vs private → public** for the template demo
   (`getPublicUrl`, synchronous, common avatar pattern; per-user write safety from the `<uid>/`
   prefix policy, not bucket privacy). `signedAvatarUrl` is retained for products that flip to a
   private bucket (they switch the settings render path to `createSignedUrl`).
-- ⚠️ OPEN / TO CONFIRM — **Phase 3 reconciliation.** The Phase 3 guide (`docs/phase-3-api.md`)
-  does not yet exist; this guide writes the authoritative `auth.py` / `settings.py` /
-  `routers/me.py`. If Phase 3 already shipped any of these (e.g. `problem()` signature, whether
-  `me` is mounted), reconcile rather than duplicate.
+- ✅ RESOLVED — **Phase 3 reconciliation.** Phase 3's guide is authoritative for `auth.py` /
+  `settings.py` (incl. `supabase_jwks_url` override + `jwks_url` property) / `routers/me.py`
+  / `schemas/user.MeRead` — all shipped there matching Key ruling #5. Phase 6's api scope is
+  env wiring + the added test coverage + live JWKS verification (step 12). Verified live:
+  CLI 2.109 access tokens are `alg: ES256` and `/v1/me` 200s with no `SUPABASE_JWT_SECRET`.
 - ⚠️ OPEN / TO CONFIRM — **Phase 2 export names** for `ThemeProvider` / `QueryProvider` and the
   product-local `features/_shared/error-boundary` location used by `app/_layout.tsx`.
 - **Resolved — canonical `config.toml` key set** (see §1). The table structure shown matches
@@ -1163,7 +1255,7 @@ broadcast pattern, push loop, or CI workflows here — those are Phase 8.
   the installed CLI.
 - **Resolved — email confirmation in local DX → `enable_confirmations = false` locally** so
   signup→login is one step (the right default for the template demo). If a product wants to
-  exercise the confirmation flow locally, flip it on and use **Inbucket** (port 54324) to read
+  exercise the confirmation flow locally, flip it on and use **Mailpit** (`[local_smtp]`, port 54324) to read
   the link; hosted staging/production enforce confirmation via the dashboard.
 - **Deferred to Phase 8:** Realtime broadcast-and-invalidate (`core/realtime.ts`), the push
   loop (`/v1/push-tokens` + `send_push`), Sentry/structlog observability, the web E2E

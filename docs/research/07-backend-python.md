@@ -258,6 +258,15 @@ stamping `demo`, and apply the ⚠️ tweaks for robustness.
 ### 14. slowapi — Limiter + `app.state.limiter` + `SlowAPIMiddleware` + RateLimitExceeded
 - **Location:** PHILOSOPHY.md L45; phase-3 Step 10, Step 16, Step 4 (429 handler).
 - **Status:** ✅ (one required wiring detail → ⚠️)
+
+> **ADDENDUM (2026-07-05, empirical — supersedes the ✅ for `SlowAPIMiddleware`):** the
+> documented pattern is silently BROKEN on FastAPI 0.139 — `SlowAPIMiddleware` resolves the
+> endpoint via `route.matches(scope)`, which returns `Match.NONE` for every route under
+> FastAPI's new `_IncludedRouter` internals, so `_should_exempt` exempts every request and
+> default limits NEVER fire (verified: 120 requests → 120×200). The Phase 3 guide now ships
+> a thin `RateLimitMiddleware` calling `limiter._check_request_limit(request, None, True)`
+> directly with `key_style="url"` on the Limiter. Re-verify slowapi vs FastAPI on every
+> `/update`.
 - **Finding:** The wiring is the documented slowapi pattern: build `Limiter(key_func=...,
   default_limits=[...])`, assign `app.state.limiter`, `app.add_middleware(SlowAPIMiddleware)`,
   and register a handler for `RateLimitExceeded` (the guide renders it as problem+json — good).
