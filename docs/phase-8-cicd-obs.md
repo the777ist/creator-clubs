@@ -88,9 +88,12 @@ from an earlier phase the step says so.
       scheduled machine (`fly machine run … --schedule`).
 - [ ] **E2E harness:** `products/_template/app/playwright.config.ts` + `app/e2e/*.spec.ts`
       (signup → login → items CRUD → realtime) run against exported `dist` + local API +
-      Supabase local. A Storybook VR Playwright script iterates `storybook-static/index.json`
-      and screenshots each story × {light,dark}; baselines committed. One `.maestro/` flow
-      exists (local only).
+      Supabase local (the export runs inside the serve `webServer`'s command chain — never
+      in global-setup, which runs AFTER webServers launch). A Storybook VR Playwright
+      script iterates `storybook-static/index.json` and screenshots each story ×
+      {light,dark}; baselines committed **per platform** (`-{platform}` suffix — local set
+      + linux set from the `update-vr-baselines` CI dispatch). One `.maestro/` flow exists
+      (local only).
 - [ ] **Workflows:** `ci.yml`, `deploy-api.yml`, `eas-build.yml`, `eas-update.yml`,
       `e2e-nightly.yml`, `electron-release.yml` all present in `.github/workflows/`, valid
       YAML (actionlint-clean), using clearly-marked placeholders. **Plus the per-product
@@ -767,19 +770,28 @@ cron needs Cron Manager / Supercronic.
 **Files**
 - `products/_template/app/playwright.config.ts` *(new)*
 - `products/_template/app/e2e/items.spec.ts` *(new — signup → login → CRUD → realtime)*
-- `products/_template/app/e2e/global-setup.ts` *(new — build dist, start API + supabase)*
+- `products/_template/app/e2e/export-web.mjs` *(new — the web export, run by the serve
+  webServer's own command chain — NOT by global-setup, see the ordering rule below)*
+- `products/_template/app/e2e/global-setup.ts` *(new — backend prep ONLY: supabase
+  up-check, migrate, seed)*
 - `packages/ui/.storybook/visual-regression.spec.ts` *(new — VR over storybook-static)*
 - `packages/ui/playwright.config.ts` *(new — VR project)*
 - `products/_template/app/.maestro/login.yaml` *(new — local mobile flow)*
 
 **Contents**
 
-`app/playwright.config.ts` — two hard-won rules baked in: (1) **ports derive from
+`app/playwright.config.ts` — three hard-won rules baked in: (1) **ports derive from
 `product.json` at config load** (`8000 + 10·portIndex` / `54321 + 100·portIndex`) — the
 "ports come from product.json" doctrine applies to EVERY file the generator copies, not just
 env/config files; hardcoded 8000/54321 here made the first stamped product's E2E hit the
 TEMPLATE's stack; (2) **both long-lived processes are Playwright `webServer` entries**
-(multi-webServer) — Playwright owns readiness + teardown, global-setup only prepares state:
+(multi-webServer) — Playwright owns readiness + teardown; (3) **`webServer` processes launch
+BEFORE `globalSetup` runs** (proven empirically on the first nightly CI run: the serve entry
+404'd for the full 60s timeout with ZERO global-setup output), so **anything a webServer's
+readiness depends on must be produced by that webServer's OWN command chain** — hence the
+export runs inside the serve command, with a readiness timeout long enough to cover it.
+Locally this ordering bug never surfaces (a stale `dist/` from earlier runs +
+`reuseExistingServer` mask it), which is exactly why it must be structural, not tested-into:
 ```ts
 import { defineConfig, devices } from "@playwright/test";
 import { readFileSync } from "node:fs";
@@ -798,9 +810,13 @@ export default defineConfig({
   use: { baseURL: "http://localhost:8081", trace: "on-first-retry" },
   webServer: [
     {
-      // `-s` (SPA fallback) is REQUIRED — without it deep links like /signup 404.
-      command: "npx serve dist -s -l 8081",
+      // The EXPORT lives in this command chain (webServer starts before globalSetup —
+      // putting it there serves 404s forever on a clean CI checkout). `-s` (SPA fallback)
+      // is REQUIRED — without it deep links like /signup 404. `npx --yes` because CI's
+      // cold npx cache must not prompt.
+      command: "node e2e/export-web.mjs && npx --yes serve dist -s -l 8081",
       url: "http://localhost:8081",
+      timeout: 300_000, // readiness genuinely awaits the export
       reuseExistingServer: !process.env.CI,
     },
     {
@@ -851,19 +867,43 @@ test("signup → login → items CRUD → realtime", async ({ browser }) => {
 });
 ```
 
-`app/e2e/global-setup.ts` — STATE PREPARATION ONLY (the long-lived processes are the
-config's `webServer` entries): supabase up-check, migrate, seed, export. Two export traps
-are handled explicitly: (1) **`expo export` pins `NODE_ENV=production`**, so
-`.env.production`'s placeholders win over `.env.development` — parse `.env.development` and
-inject its `EXPO_PUBLIC_*` as DIRECT env vars (they beat dotenv); (2) **Metro's transform
-cache doesn't key on `EXPO_PUBLIC_*`** — export with `--clear` or the previous bundle
-replays byte-identical. Also sanitize `CI`: expo-cli's `getenv.boolish("CI")` THROWS on an
+`app/e2e/export-web.mjs` — the web export, invoked by the serve webServer's OWN command
+chain (NEVER by global-setup — webServer starts first). Two export traps are handled
+explicitly: (1) **`expo export` pins `NODE_ENV=production`**, so `.env.production`'s
+placeholders win over `.env.development` — parse `.env.development` and inject its
+`EXPO_PUBLIC_*` as DIRECT env vars (they beat dotenv); (2) **Metro's transform cache
+doesn't key on `EXPO_PUBLIC_*`** — export with `--clear` or the previous bundle replays
+byte-identical. Also sanitize `CI`: expo-cli's `getenv.boolish("CI")` THROWS on an
 empty-string `CI=`:
-```ts
+```js
+// e2e/export-web.mjs — runs inside the serve webServer's command chain, so Playwright's
+// readiness check genuinely awaits the export (that webServer's `timeout` covers it).
 import { execSync } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const APP = join(dirname(fileURLToPath(import.meta.url)), "..");
+
+const envFile = readFileSync(join(APP, ".env.development"), "utf8");
+const publicVars = Object.fromEntries(
+  envFile
+    .split("\n")
+    .filter((l) => l.startsWith("EXPO_PUBLIC_"))
+    .map((l) => l.split("=", 2)),
+);
+const env = { ...process.env, ...publicVars, NODE_ENV: "development" };
+if (env.CI === "") delete env.CI; // getenv.boolish("CI") throws on empty string
+execSync("npx expo export --platform web --clear", { cwd: APP, stdio: "inherit", env });
+```
+
+`app/e2e/global-setup.ts` — BACKEND STATE PREPARATION ONLY (the long-lived processes are
+the config's `webServer` entries, and the export belongs to the serve entry's command
+chain):
+```ts
+import { execSync } from "node:child_process";
 import { join } from "node:path";
-import { API_PORT, SUPABASE_PORT } from "../playwright.config";
+import { SUPABASE_PORT } from "../playwright.config";
 
 export default async function globalSetup() {
   // 1. local Supabase must be up (per-product offset ports from config.toml)
@@ -873,25 +913,16 @@ export default async function globalSetup() {
     cwd: join(__dirname, "..", "..", "api"),
     stdio: "inherit",
   });
-  // 3. export the web bundle: .env.development values injected as DIRECT env vars + --clear
-  const envFile = readFileSync(join(__dirname, "..", ".env.development"), "utf8");
-  const publicVars = Object.fromEntries(
-    envFile.split("\n")
-      .filter((l) => l.startsWith("EXPO_PUBLIC_"))
-      .map((l) => l.split("=", 2) as [string, string]),
-  );
-  const env = { ...process.env, ...publicVars, NODE_ENV: "development" };
-  if (env.CI === "") delete env.CI; // getenv.boolish("CI") throws on empty string
-  execSync("npx expo export --platform web --clear", {
-    cwd: join(__dirname, ".."),
-    stdio: "inherit",
-    env,
-  });
 }
 ```
-> ✅ RESOLVED (was OPEN — process orchestration): both long-lived processes (`serve -s dist`,
-> uvicorn) are Playwright **`webServer`** entries — Playwright owns readiness + teardown;
-> global-setup only prepares state. No hand-rolled background-process/teardown glue.
+> ✅ RESOLVED (was OPEN — process orchestration), with one hard ordering rule proven on the
+> first nightly CI run: **Playwright launches `webServer` processes BEFORE `globalSetup`
+> runs** (the run timed out after 60s on the serve entry with zero global-setup output —
+> `dist/` didn't exist because the export lived in global-setup; locally a stale `dist/` +
+> `reuseExistingServer` masked the ordering). Both long-lived processes are `webServer`
+> entries — Playwright owns readiness + teardown — but **anything a webServer's readiness
+> depends on must be produced by that webServer's OWN command chain** (or before
+> `playwright test` entirely), never by global-setup. global-setup keeps only backend prep.
 
 `packages/ui/.storybook/visual-regression.spec.ts` (iterate `storybook-static/index.json`):
 ```ts
@@ -916,10 +947,16 @@ for (const story of stories) {
 }
 ```
 
-> **Baseline platform note:** screenshot baselines are platform-sensitive (font rendering).
-> If baselines were committed from another OS (strip the platform suffix from snapshot names
-> to share them), ubuntu CI may still diff — regenerate baselines ON the CI platform when
-> wiring real CI (document the choice in `packages/ui/playwright.config.ts`).
+> **Baselines are PER-PLATFORM — commit TWO sets per story×theme.** Proven on the nightly's
+> first CI run: all 44 baselines were rendered on Windows, and ubuntu-latest's different
+> font antialiasing failed every `toHaveScreenshot`. Stripping the `{platform}` suffix to
+> "keep names stable" is structurally wrong — one baseline set cannot satisfy two render
+> platforms. The config below keeps `-{platform}` in `snapshotPathTemplate`; the local set
+> is committed from local runs, and the **linux set is generated ON the actual GitHub
+> runner** via the e2e-nightly `update-vr-baselines: true` dispatch input (downloads as the
+> `vr-baselines-linux` artifact to commit). Generating linux baselines in a local Docker
+> container was evaluated and REJECTED: the playwright image's font set is not guaranteed
+> to match the GitHub runner's.
 
 `packages/ui/playwright.config.ts` (VR project against the static build):
 ```ts
@@ -929,12 +966,16 @@ export default defineConfig({
   testDir: ".storybook",
   testMatch: "visual-regression.spec.ts",
   use: { baseURL: "http://localhost:6006" },
+  // PER-PLATFORM baselines: keep {platform} in the template. TWO committed sets per
+  // story×theme — the local platform's (from local runs) and linux's (generated ON the
+  // GitHub runner via the e2e-nightly `update-vr-baselines` dispatch; a local Docker
+  // container's fonts are NOT guaranteed to match the runner's).
+  snapshotPathTemplate: "{testDir}/__screenshots__/{arg}-{platform}{ext}",
   webServer: {
     command: "npx http-server storybook-static -p 6006 -s",
     url: "http://localhost:6006",
     reuseExistingServer: !process.env.CI,
   },
-  // committed baselines live next to the spec; update with --update-snapshots
 });
 ```
 
@@ -959,7 +1000,9 @@ pnpm --filter @platform/ui add -D @playwright/test http-server
 # commit VR baselines (first run authors them). NOTE the script name is `build-storybook`
 # (Phase 2's committed name, also baked into packages/ui/CLAUDE.md) — NOT `storybook:build`:
 pnpm --filter @platform/ui build-storybook      # → storybook-static/
-pnpm --filter @platform/ui exec playwright test --update-snapshots
+pnpm --filter @platform/ui exec playwright test --update-snapshots   # LOCAL-platform set
+# The LINUX set comes from CI, not from here: Actions → "E2E Nightly" → Run workflow with
+# update-vr-baselines: true → download the vr-baselines-linux artifact → commit *-linux.png.
 # run web E2E locally:
 pnpm --filter @platform/template-app exec playwright test
 # Maestro (local, needs a running simulator/dev build):
@@ -1257,7 +1300,12 @@ name: E2E Nightly
 on:
   schedule:
     - cron: "0 4 * * *"          # nightly 04:00 UTC
-  workflow_dispatch: {}          # on-demand (the Verify path)
+  workflow_dispatch:             # on-demand (the Verify path)
+    inputs:
+      update-vr-baselines:
+        description: "Regenerate the LINUX VR baseline set on the runner and upload it as an artifact (instead of asserting)"
+        type: boolean
+        default: false
 jobs:
   web-e2e:
     runs-on: ubuntu-latest
@@ -1290,15 +1338,29 @@ jobs:
       - name: Build Storybook
         # script name is `build-storybook` (Phase 2's committed name) — NOT `storybook:build`
         run: pnpm --filter @platform/ui build-storybook
-      - name: Visual regression (each story × light/dark vs committed baselines)
+      - name: Visual regression (each story × light/dark vs committed LINUX baselines)
+        if: ${{ !inputs.update-vr-baselines }}
         run: pnpm --filter @platform/ui exec playwright test
+      # The linux baseline set MUST be generated on the actual runner (a local Docker
+      # playwright image's fonts are not guaranteed to match). Dispatch with
+      # update-vr-baselines: true, download the artifact, commit the -linux.png set.
+      - name: Regenerate linux VR baselines (dispatch input)
+        if: ${{ inputs.update-vr-baselines }}
+        run: pnpm --filter @platform/ui exec playwright test --update-snapshots
+      - name: Upload linux baselines
+        if: ${{ inputs.update-vr-baselines }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: vr-baselines-linux
+          path: packages/ui/.storybook/__screenshots__/*-linux.png
 ```
-> Two independent jobs so a VR diff doesn't mask an E2E failure (and vice versa). VR baselines
-> are committed; a diff fails the job and uploads the comparison (add an
-> `actions/upload-artifact` step for the Playwright report when wiring CI for real). The
-> web-e2e job runs against the SUPABASE LOCAL stack (not a bare postgres service container) —
-> the E2E exercises auth + realtime, which need the full stack; baselines may need
-> regeneration on ubuntu if they were committed from another OS (see step e).
+> Two independent jobs so a VR diff doesn't mask an E2E failure (and vice versa). VR
+> baselines are committed PER PLATFORM (`-{platform}` in `snapshotPathTemplate` — step e);
+> CI asserts against the `-linux` set, refreshed via the `update-vr-baselines` dispatch →
+> `vr-baselines-linux` artifact → commit. A diff fails the job and uploads the comparison
+> (add an `actions/upload-artifact` step for the Playwright report when wiring CI for
+> real). The web-e2e job runs against the SUPABASE LOCAL stack (not a bare postgres service
+> container) — the E2E exercises auth + realtime, which need the full stack.
 
 **Commands** — Actions → "E2E Nightly" → **Run workflow** (`workflow_dispatch`).
 
@@ -1476,7 +1538,8 @@ CLAUDE.md). The **add-a-component recipe** (enforced verbatim):
 3. Write <name>.stories.tsx — ONE story per cva variant.
 4. Write <name>.figma.tsx — Code Connect map (Figma props → cva variants).
 5. Export from src/index.ts.
-6. Commit the VR baseline (light + dark) — see e2e-nightly VR.
+6. Commit BOTH VR baseline sets per story×theme — the local platform's
+   (playwright test --update-snapshots locally) AND the linux set (see "VR baselines").
 
 ## Invariants
 - Tokens ONLY. NEVER name a color (no hex, no brand values) — use bg-primary etc.
@@ -1487,6 +1550,14 @@ CLAUDE.md). The **add-a-component recipe** (enforced verbatim):
 
 ## Storybook
 pnpm --filter @platform/ui storybook — toolbar has light/dark + brand (template/demo).
+
+## VR baselines (per-platform — TWO committed sets)
+Baselines are platform-suffixed ({arg}-{platform}.png): one baseline set cannot satisfy
+two render platforms (font antialiasing differs). Local set: playwright test
+--update-snapshots. Linux set: Actions → "E2E Nightly" → Run workflow with
+update-vr-baselines: true → download the vr-baselines-linux artifact → commit the
+*-linux.png files. Never generate the linux set in a local Docker container — its fonts
+are not guaranteed to match the GitHub runner's.
 
 ## Figma
 Code Connect maps are authored as *.figma.tsx and published via the Code Connect CLI.
@@ -1599,6 +1670,19 @@ product-scoped and load from the session's project root.
   `git grep -inE 'example|TODO'` should surface exactly these and nothing else. (The former
   `PARSE-FROM-TAG` placeholders in `eas-build.yml`/`electron-release.yml` are now resolved to
   real `${GITHUB_REF_NAME%%-<surface>-v*}` parse steps.)
+- **Playwright launches `webServer` BEFORE `globalSetup` — never produce a webServer's
+  readiness dependency in global-setup.** The first nightly CI run proved it: the serve
+  entry 404'd for its full timeout with zero global-setup output, because `dist/` was
+  exported in global-setup. Locally the bug is MASKED (stale `dist/` from earlier runs +
+  `reuseExistingServer`), so it only detonates on a clean checkout. Anything a webServer's
+  readiness depends on must be produced by that webServer's own command chain (or before
+  `playwright test` entirely).
+- **VR baselines are per-platform — one set cannot pass on two render platforms.** Windows
+  and ubuntu antialias fonts differently; all 44 win32-rendered baselines failed on
+  ubuntu-latest. Keep `-{platform}` in `snapshotPathTemplate` and commit TWO sets: local
+  (from local runs) + linux (generated ON the GitHub runner via the `update-vr-baselines`
+  dispatch → artifact; NOT via a local Docker playwright image, whose fonts aren't
+  guaranteed to match the runner's).
 - **Port-squatting when re-verifying servers.** A leftover E2E `uvicorn` can squat port 8000
   and silently serve a SECOND instance's curl checks — before re-verifying, find the PID via
   `netstat` and kill it (on Windows, kill `electron.exe`/`python.exe` itself, not a shim).
@@ -1707,8 +1791,11 @@ commits):
   tune per product. (`updated_at` already exists on Phase 3's `UUIDModel` base.)
 - **RESOLVED — E2E process orchestration:** Playwright **multi-`webServer`** owns both
   long-lived processes (`serve -s dist`, uvicorn) — readiness + teardown included;
-  global-setup only prepares state (supabase up-check, migrate, seed, export). No
-  hand-rolled background/teardown glue.
+  global-setup only prepares BACKEND state (supabase up-check, migrate, seed). Hard
+  ordering rule (proven on the first nightly CI run): **webServer processes launch BEFORE
+  globalSetup**, so the web export lives in the serve webServer's own command chain
+  (`node e2e/export-web.mjs && npx --yes serve dist -s -l 8081`, readiness timeout 300s) —
+  never in global-setup. No hand-rolled background/teardown glue.
 - **RESOLVED — `--affected` base ref in CI:** with `fetch-depth: 0` Turbo auto-detects the
   base (PR base ref / previous push commit); `ci.yml` also sets `TURBO_SCM_BASE`/`TURBO_SCM_HEAD`
   explicitly to be robust against squash-merge histories. Revisit only if CI mis-scopes.

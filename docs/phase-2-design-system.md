@@ -1256,7 +1256,10 @@ Add a Tier-1 owned primitive to @platform/ui. Argument: $ARGUMENTS (component na
 3. Write src/components/ui/<name>.stories.tsx — one story per cva variant.
 4. Write src/components/ui/<name>.figma.tsx — Code Connect map (Figma props → cva variants).
 5. Export from src/index.ts.
-6. Commit a VR baseline (light + dark) by running the Storybook build + Playwright snapshot.
+6. Commit the VR baselines (light + dark) by running the Storybook build + Playwright
+   snapshot — TWO sets per story×theme once Phase 8 wires VR: the local platform's
+   (--update-snapshots locally) and linux's (via the e2e-nightly update-vr-baselines
+   dispatch; baselines are platform-suffixed and per-platform by design).
 ```
 
 `packages/ui/.claude/commands/sync-tokens.md`:
