@@ -22,8 +22,7 @@ built-state form, so the finished repo carries only its runtime surface — `CLA
   - `scripts/{new-product,bootstrap,figma-tokens}.mjs`.
   - The runtime slash commands (`new-product`, `remove-product`, `affected`, `typegen`, `release`,
     `add-component`, `sync-tokens`, `bootstrap-design-system`, `add-feature`, the
-    `ptfm-*` pipeline) and the `RENAME.md` playbook (executed by Phase 10, which
-    deletes it too when it completes).
+    `ptfm-*` pipeline).
   - `products/_template` builds and a `demo` product was stamped (Phase 7 proof).
   - `turbo run lint typecheck test build` green; the api gates (Ruff/pyright/pytest) green.
 - **If any of the above is missing or red, STOP.** Do NOT strip scaffolding on an incomplete or
@@ -59,8 +58,8 @@ template` (the `/implement 1…9` list). **Keep + renumber** `## Stage 2 — cre
 layout`, `## Conventions`, `## Operational stack` + the `ptfm-*` pipeline, and `## Where to read
 more` (drop its `docs/phase-*.md` row). **Keep (or add) the rename step**: the
 built-state README ends Stage-1 guidance with the one step that remains —
-`/implement 10 <name>` (Phase 10, executing `RENAME.md`) to swap the generic identity for
-the real one. Result: "what it
+`/implement 10 <name>` (the self-contained rename playbook in
+`docs/phase-10-rename.md`) to swap the generic identity for the real one. Result: "what it
 is → what it's built with → prerequisites → rename to your identity → create & run a product
 → layout → conventions → workflow → where to read more."
 
@@ -69,9 +68,9 @@ is → what it's built with → prerequisites → rename to your identity → cr
 `rm .claude/commands/update.md` — `/update` (the template **maintainer's** research-refresh
 command) is template machinery; a finished repo doesn't carry it. **KEEP
 `.claude/commands/implement.md`** — Phase 10 (the rename) still runs through it and strips
-it as its own final act, along with `docs/phase-10-rename.md` and `RENAME.md` itself
-(recoverable from git history; the procedure is an involution, so the historical playbook
-suffices for a later rebrand or reversal). Finalize
+it as its own final act, along with `docs/phase-10-rename.md` (recoverable from git
+history; the rename is an involution, so the historical guide suffices for a later
+rebrand or reversal). Finalize
 runs only in a *consumer's* copy of the template — the maintained template repo itself is
 never finalized.
 
@@ -111,8 +110,7 @@ PHILOSOPHY/README rewrites land together).
 - `git grep -nE 'docs/phase-[1-9]-|commands/update\b'` is clean (modulo kept research
   history); phase-10/implement references remain by design.
 - The runtime surface is untouched: `scripts/`, the `CLAUDE.md` files, `packages/ui/FIGMA.md`,
-  the `ptfm-*` + thin-wrapper commands, `PHILOSOPHY.md` (+ `RENAME.md`, present until
-  Phase 10 consumes it).
+  the `ptfm-*` + thin-wrapper commands, `PHILOSOPHY.md`.
 
 ## Definition of done
 

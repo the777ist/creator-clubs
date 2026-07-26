@@ -113,12 +113,13 @@ and verified, it strips the template machinery.
 
 **Phase 10 is the rename.** A finalized repo still carries the generic identity (root
 package `platform`, org placeholder `example`, package scope `@platform/*`).
-`/implement 10 <your-name>` executes [`RENAME.md`](RENAME.md) — three reviewable layers
+`/implement 10 <your-name>` runs the self-contained playbook in
+[`docs/phase-10-rename.md`](docs/phase-10-rename.md) — three reviewable layers
 (repo identity → org → package scope) with exact-count replacements and the full
 verification gate after, while the fourth layer (the `template` product token, brand
 modes, workflow filters) is stamping machinery and never renames — then strips the last
-scaffolding (`/implement`, the phase-10 guide, and `RENAME.md` itself; all in git history,
-and the procedure is an involution, so reversal stays possible).
+scaffolding (`/implement` + the guide itself; both in git history, and the procedure is
+an involution, so reversal stays possible).
 
 ---
 
@@ -256,6 +257,5 @@ than update from stale knowledge.
 | [`PHILOSOPHY.md`](PHILOSOPHY.md) | Architecture, locked decisions, conventions, repo spec |
 | [`docs/phase-*.md`](docs/) | Literal step-by-step build guides (one per phase) |
 | [`docs/research/`](docs/research/) | The fact-check behind every stack choice, with sources |
-| [`RENAME.md`](RENAME.md) | The template-to-real-identity renaming playbook (Phase 10 executes it, then removes it) |
 | [`packages/ui/FIGMA.md`](packages/ui/FIGMA.md) | Design-system / token contract (also the designer handover doc) |
 | `CLAUDE.md` (root / `packages/ui` / per-product) | The authoritative add-a-thing recipes — *built during implementation* |
