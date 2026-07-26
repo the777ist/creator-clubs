@@ -8,8 +8,9 @@ procedure: extracted from the actual rename of the reference build
 (its commits `fa2eb9f` → `eea8a91` → `114a0ed`, 117 file changes), validated by running
 it in REVERSE (reproducing the pre-rename tree **byte-exactly**), and re-proven by a
 fresh-clone end-to-end test run (`sevenfold`) that passed every local gate plus remote
-CI and the dispatched nightly E2E/VR on the renamed state. Run it via the `/rename`
-slash command — or follow it by hand.
+CI and the dispatched nightly E2E/VR on the renamed state. Run it via `/implement 10
+<new-identity>` (guide: `docs/phase-10-rename.md`) — or follow it by hand for a later
+rebrand or reversal.
 
 Throughout, `<repo>` = your new identity (worked example: `the777incident`). One identity
 serves as repo name, org, and scope here; if yours differ, substitute per layer.
