@@ -19,7 +19,7 @@ built-state form, so the finished repo carries only its runtime surface — `CLA
   - The `CLAUDE.md` surface (root, `packages/ui`, each product + nested api) and
     `packages/ui/FIGMA.md`.
   - `scripts/{new-product,bootstrap,figma-tokens}.mjs`.
-  - The runtime slash commands (`new-product`, `affected`, `typegen`, `release`,
+  - The runtime slash commands (`new-product`, `remove-product`, `affected`, `typegen`, `release`,
     `add-component`, `sync-tokens`, `bootstrap-design-system`, `add-feature`, `rename`, the
     `ptfm-*` pipeline) and the `RENAME.md` playbook `/rename` executes.
   - `products/_template` builds and a `demo` product was stamped (Phase 7 proof).

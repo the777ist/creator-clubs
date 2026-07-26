@@ -112,6 +112,10 @@ token-pipeline config `tokens.config.json`, distinct from Code Connect's root
       `.env.example` + `product.json` + `pnpm install`; print the infra checklist).
 - [ ] Root `package.json` `"new-product"` + `"bootstrap"` script entries are present
       (both from Phase 1) — `new-product` now resolves to the generator built this phase.
+- [ ] `scripts/remove-product.mjs` exists (zero-dep inverse: confirm → `supabase stop
+      --no-backup` → delete tree → drop the `tokens.config.json` mode entry →
+      `pnpm install` → de-provision checklist; refuses `products/_template`), with the
+      root `"remove-product"` script entry and the `/remove-product` thin command.
 - [ ] `scripts/bootstrap.mjs` (from Phase 1, data-driven) brings up **both** `template` and
       `demo` stacks on offset ports without a redefinition in this phase.
 - [ ] `pnpm new-product demo` produces `products/demo` with `product.json`
@@ -690,6 +694,172 @@ brand assets — with **zero** `template` tokens remaining (Verify #5).
 
 ---
 
+### Step 7 — `scripts/remove-product.mjs` (the automated inverse) + `/remove-product`
+
+**Files**
+- `scripts/remove-product.mjs`
+- `.claude/commands/remove-product.md`
+- `package.json` (root) — one script entry
+
+**Contents** — the exact inverse of a stamp; plain Node, zero deps, same bar as the generator:
+
+```js
+#!/usr/bin/env node
+// scripts/remove-product.mjs — the inverse of new-product.mjs: delete a stamped product.
+// Plain Node, ZERO runtime deps (node: builtins only). Undoes everything the generator
+// created: (1) validate + confirm (destructive!), (2) stop the product's local Supabase
+// stack BEFORE its config.toml disappears (the CLI resolves containers by the CURRENT
+// config — delete first and the containers/volumes orphan), (3) delete products/<name>,
+// (4) drop the product's brand-mode entry from tokens.config.json, (5) pnpm install to
+// drop the workspaces from the lockfile, (6) print the de-provision checklist (the
+// external infra the generator's checklist had you create).
+import { readFileSync, writeFileSync, existsSync, rmSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { execSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { createInterface } from "node:readline/promises";
+
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const PRODUCTS_DIR = join(ROOT, "products");
+
+// ---- Step 1: validate + confirm ----------------------------------------------------------
+function parseArgs() {
+  const args = process.argv.slice(2);
+  const yes = args.includes("--yes") || args.includes("-y");
+  const name = args.find((a) => !a.startsWith("-"));
+  if (!name) die("usage: pnpm remove-product <name> [--yes]");
+  if (name === "template" || name.startsWith("_")) {
+    die(`refusing to remove "${name}" — products/_template is the mold every product stamps from`);
+  }
+  const dest = join(PRODUCTS_DIR, name);
+  if (!existsSync(dest)) die(`product "${name}" does not exist at products/${name}`);
+  return { name, dest, yes };
+}
+
+async function confirm(name) {
+  if (!process.stdin.isTTY) {
+    die(`non-interactive session — re-run with --yes to confirm removing products/${name}`);
+  }
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  const answer = await rl.question(
+    `⚠ This DELETES products/${name} (files, local Supabase stack + data volumes).\n` +
+      `  Type the product name to confirm: `,
+  );
+  rl.close();
+  if (answer.trim() !== name) die("confirmation did not match — nothing was removed");
+}
+
+// ---- Step 2: stop the local Supabase stack (BEFORE the config is deleted) ----------------
+function stopSupabase(name, dest) {
+  if (!existsSync(join(dest, "supabase", "config.toml"))) return;
+  try {
+    // --no-backup also removes the stack's data volumes — this product is going away.
+    execSync("supabase stop --no-backup", { cwd: dest, stdio: "inherit" });
+  } catch {
+    console.warn(
+      `⚠ could not stop the "${name}" Supabase stack (CLI missing, Docker down, or not running) — ` +
+        `if containers/volumes linger: docker volume ls --filter label=com.supabase.cli.project=example-${name}`,
+    );
+  }
+}
+
+// ---- Step 4: drop the brand-mode entry the generator registered ---------------------------
+function removeFigmaMode(name) {
+  const f = join(ROOT, "tokens.config.json");
+  if (!existsSync(f)) return;
+  const cfg = JSON.parse(readFileSync(f, "utf8"));
+  if (cfg.modes && name in cfg.modes) {
+    delete cfg.modes[name];
+    writeFileSync(f, JSON.stringify(cfg, null, 2) + "\n");
+  }
+}
+
+// ---- Step 6: print the de-provision checklist ---------------------------------------------
+function printChecklist(name) {
+  const org = "example"; // placeholder org (Naming conventions header)
+  console.log(`
+✅ Removed products/${name} (workspaces dropped from the lockfile)
+
+────────────────────────────────────────────────────────────────────
+ DE-PROVISION CHECKLIST for "${name}" (skip whatever was never created)
+────────────────────────────────────────────────────────────────────
+ [ ] Supabase: delete projects  ${org}-${name}-stg  and  ${org}-${name}-prod
+ [ ] Fly: flyctl apps destroy ${org}-${name}-api-stg
+          flyctl apps destroy ${org}-${name}-api-prod
+ [ ] Vercel: delete the ${name} project
+ [ ] EAS: delete the ${name} project (expo.dev dashboard)
+ [ ] Desktop: archive/delete the ${org}/${name}-desktop-releases repo
+ [ ] Sentry: delete the 4 ${name} projects (app stg/prod, api stg/prod)
+ [ ] GitHub Actions: remove per-product secrets (FLY_API_TOKEN_${name.toUpperCase().replace(/-/g, "_")}, ...)
+     and the "${name}" filter entries in deploy-api.yml / eas-update.yml (if added)
+ [ ] FIGMA: ask design to retire the "${name}" brand mode
+ [ ] git: the deletion is in your working tree — review and commit it
+────────────────────────────────────────────────────────────────────
+`);
+}
+
+function die(msg) {
+  console.error("✖ " + msg);
+  process.exit(1);
+}
+
+// ---- main ---------------------------------------------------------------------------------
+async function main() {
+  const { name, dest, yes } = parseArgs();
+  if (!yes) await confirm(name);
+
+  console.log(`→ stopping the "${name}" local Supabase stack (if running)...`);
+  stopSupabase(name, dest); // Step 2 — must precede the delete
+
+  console.log(`→ deleting products/${name}`);
+  rmSync(dest, { recursive: true, force: true }); // Step 3
+
+  removeFigmaMode(name); // Step 4
+
+  console.log("→ pnpm install (dropping the removed workspaces)...");
+  execSync("pnpm install", { cwd: ROOT, stdio: "inherit" }); // Step 5
+
+  printChecklist(name); // Step 6
+}
+await main();
+```
+
+`.claude/commands/remove-product.md` (thin runnable recipe):
+
+````md
+Remove a stamped product — the inverse of `/new-product`. Argument: $ARGUMENTS (the
+product's kebab-case name; `products/_template` is refused — it's the mold).
+
+```bash
+pnpm remove-product $ARGUMENTS   # = node scripts/remove-product.mjs $ARGUMENTS [--yes]
+```
+
+DESTRUCTIVE: it stops the product's local Supabase stack (with `--no-backup`, dropping its
+data volumes) BEFORE deleting `products/<name>`, removes the brand-mode entry from
+`tokens.config.json`, runs `pnpm install` to drop the workspaces from the lockfile, and
+prints the de-provision checklist (Fly apps, Supabase projects, Vercel, EAS, Sentry,
+desktop-releases repo, CI secrets + the product's deploy-api/eas-update filter entries).
+Interactive runs must type the product name to confirm; non-interactive runs need `--yes`.
+The deletion lands in the working tree — review and commit it.
+````
+
+Root `package.json` gains one entry next to `new-product`:
+
+```json
+"remove-product": "node scripts/remove-product.mjs"
+```
+
+**Why**
+Products come and go over the repo's lifetime, and retiring a stamp by hand is a four-step
+dance whose ORDER matters — the Supabase CLI resolves containers by the CURRENT
+`project_id`, so the stack must stop BEFORE the tree (and its `supabase/config.toml`)
+disappears, or the containers/volumes orphan. The script encodes the safe order (confirm →
+`supabase stop --no-backup` → delete tree → drop the `tokens.config.json` mode entry →
+`pnpm install` → print the de-provision checklist), refuses `products/_template` (the
+mold), and mirrors the generator's infra checklist with the matching de-provision one.
+
+---
+
 ## Gotchas & pitfalls
 
 - **Whole-word only — never partial-match — with two empirical corrections.** The
@@ -868,8 +1038,10 @@ Supabase block 54521, edge inspector 8103); kebab→snake module dir `src/audit_
 `pyproject.toml` + rewritten `uv.lock` agree on `audit-probe-api` and **`uv run` actually
 syncs and executes** (openapi export runs); Pascal variant `AuditProbe` (electron
 productName, pyproject description); `TODO-MODE-ID-AUDIT-PROBE` registered; zero token
-leaks. Then remove the probe fully: delete the dir, revert the `tokens.config.json` entry
-and `pnpm-lock.yaml`, and re-run `pnpm install` — tree clean.
+leaks. Then remove the probe fully with the inverse built in Step 7:
+`pnpm remove-product audit-probe --yes` — stack stopped, tree gone, `tokens.config.json`
+entry dropped, lockfile reinstalled; `git status` back to clean. (This doubles as the
+remove-product round-trip verification.)
 
 ---
 
@@ -887,6 +1059,9 @@ Suggested split on a `phase-7-generator` branch:
    `bootstrap` script entries already exist from Phase 1. (Steps 3–4)
 3. **`feat(products): stamp demo product (portIndex=1)`** — the generated
    `products/demo/**` tree + the `tokens.config.json` `demo` mode entry. (Step 6)
+4. **`feat(scripts): remove-product — the automated inverse of new-product`** —
+   `scripts/remove-product.mjs`, `.claude/commands/remove-product.md`, the root
+   `"remove-product"` script entry. (Step 7)
 
 > `scripts/bootstrap.mjs` is **not** a Phase 7 commit — it ships in Phase 1 (data-driven),
 > and Step 5 here only exercises it against the newly-stamped `demo`.
