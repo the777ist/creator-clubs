@@ -425,7 +425,7 @@ function rewrite(text, replacers) {
 // keys: demo"). Mask `template =` keys before the token pass, restore after. (Phase 6
 // also deletes those default lines from the template's config.toml — this guard is the
 // generator-side backstop for any future CLI default that reintroduces one.)
-const TOML_KEY_MASK = " TOML_TEMPLATE_KEY ";
+const TOML_KEY_MASK = "__TOML_TEMPLATE_KEY__";
 function rewriteContents(path, text, replacers) {
   if (path.endsWith(".toml")) {
     const masked = text.replace(/^(\s*)template(\s*=)/gm, `$1${TOML_KEY_MASK}$2`);
