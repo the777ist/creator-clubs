@@ -1477,11 +1477,12 @@ packages/{config,ui,core}; products/{_template,demo}/{app,desktop,api,api-client
 - X-Request-Id: client → API → logs; same id tags Sentry on both sides.
 
 ## Commands
-/new-product <name> · /affected · /typegen <product> · /release <product> <surface>
+/new-product <name> · /remove-product <name> · /affected · /typegen <product> · /release <product> <surface>
 /add-component <name> · /sync-tokens · /bootstrap-design-system
 ```
 Root `.claude/commands/` inventory (each a thin runnable recipe): `new-product.md`
-(`node scripts/new-product.mjs $ARG`), `affected.md` (`turbo run lint typecheck test build
+(`node scripts/new-product.mjs $ARG`), `remove-product.md`
+(`node scripts/remove-product.mjs $ARG`), `affected.md` (`turbo run lint typecheck test build
 --affected`), `typegen.md` (`turbo run openapi build --filter=*$ARG-api-client`),
 `release.md` (tag `<product>-<surface>-v*`, push), `add-component.md` (delegates to the
 `packages/ui` recipe), `sync-tokens.md` (`node scripts/figma-tokens.mjs`),

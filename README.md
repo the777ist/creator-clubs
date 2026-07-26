@@ -103,12 +103,23 @@ verification gate. With Claude Code, the `/implement` command drives a phase end
 /implement 7     # the `new-product` generator
 /implement 8     # CI/CD, observability, realtime, push
 /implement 9     # finalize: strip build scaffolding (destructive; after 1-8 verified)
+/implement 10 <your-name>   # rename: generic identity -> YOURS (after finalize; asks to confirm)
 ```
 
 (Or build manually straight from `docs/phase-N-*.md`.) After Phase 7 you have a working
 `products/_template` starter — auth screens, an API-backed list (items CRUD), settings with a
 theme/dark toggle, and tab navigation. **Phase 9** is the graduation step: once 1–8 are built
 and verified, it strips the template machinery.
+
+**Phase 10 is the rename.** A finalized repo still carries the generic identity (root
+package `platform`, org placeholder `example`, package scope `@platform/*`).
+`/implement 10 <your-name>` runs the self-contained playbook in
+[`docs/phase-10-rename.md`](docs/phase-10-rename.md) — three reviewable layers
+(repo identity → org → package scope) with exact-count replacements and the full
+verification gate after, while the fourth layer (the `template` product token, brand
+modes, workflow filters) is stamping machinery and never renames — then strips the last
+scaffolding (`/implement` + the guide itself; both in git history, and the procedure is
+an involution, so reversal stays possible).
 
 ---
 
@@ -139,6 +150,10 @@ pnpm dev                # run the Expo app (web/native) + local API
 
 Make it yours: replace brand assets (`gen-brand.mjs`, uses `sharp`), set the product's **Figma
 brand mode**, then `/sync-tokens` re-themes everything with zero component edits.
+
+To delete a product later: `pnpm remove-product <name>` — the exact inverse (stops its local
+stack, removes the tree + lockfile workspaces + brand-mode entry, prints the de-provision
+checklist).
 
 ---
 

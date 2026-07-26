@@ -6,7 +6,8 @@
 > destructive and recoverable only via git history; guard hard and confirm before running.
 
 **Goal:** Once Phases 1–8 are built and verified, remove the build-time scaffolding (the
-`/implement` + `/update` commands and the per-phase guides) and rewrite the build-oriented docs into their
+`/update` command and phase guides 1–9; `/implement` + `docs/phase-10-rename.md` survive as
+the LAST scaffolding, which Phase 10 strips itself) and rewrite the build-oriented docs into their
 built-state form, so the finished repo carries only its runtime surface — `CLAUDE.md` files,
 `scripts/`, the slash commands, `PHILOSOPHY.md` — with no leftover construction artifacts.
 
@@ -19,9 +20,9 @@ built-state form, so the finished repo carries only its runtime surface — `CLA
   - The `CLAUDE.md` surface (root, `packages/ui`, each product + nested api) and
     `packages/ui/FIGMA.md`.
   - `scripts/{new-product,bootstrap,figma-tokens}.mjs`.
-  - The runtime slash commands (`new-product`, `affected`, `typegen`, `release`,
-    `add-component`, `sync-tokens`, `bootstrap-design-system`, `add-feature`, the `ptfm-*`
-    pipeline).
+  - The runtime slash commands (`new-product`, `remove-product`, `affected`, `typegen`, `release`,
+    `add-component`, `sync-tokens`, `bootstrap-design-system`, `add-feature`, the
+    `ptfm-*` pipeline).
   - `products/_template` builds and a `demo` product was stamped (Phase 7 proof).
   - `turbo run lint typecheck test build` green; the api gates (Ruff/pyright/pytest) green.
 - **If any of the above is missing or red, STOP.** Do NOT strip scaffolding on an incomplete or
@@ -55,21 +56,30 @@ build-process sections: `## Status` (the "not built yet" framing) and `## Stage 
 template` (the `/implement 1…9` list). **Keep + renumber** `## Stage 2 — create a product` →
 `## Create a product`. **Keep:** the intro, `## Tech stack`, `## Prerequisites`, `## Repository
 layout`, `## Conventions`, `## Operational stack` + the `ptfm-*` pipeline, and `## Where to read
-more` (drop its `docs/phase-*.md` row). Result: "what it is → what it's built with →
-prerequisites → create & run a product → layout → conventions → workflow → where to read more."
+more` (drop its `docs/phase-*.md` row). **Keep (or add) the rename step**: the
+built-state README ends Stage-1 guidance with the one step that remains —
+`/implement 10 <name>` (the self-contained rename playbook in
+`docs/phase-10-rename.md`) to swap the generic identity for the real one. Result: "what it
+is → what it's built with → prerequisites → rename to your identity → create & run a product
+→ layout → conventions → workflow → where to read more."
 
 ### Step 4 — Delete the build-time commands
 
-`rm .claude/commands/implement.md .claude/commands/update.md` — `/implement` (the build-phase
-command) and `/update` (the template **maintainer's** research-refresh command) are template
-machinery; a finished product repo carries neither. Finalize runs only in a *consumer's* copy
-of the template, so sweeping both out is correct — the maintained template repo itself is never
-finalized.
+`rm .claude/commands/update.md` — `/update` (the template **maintainer's** research-refresh
+command) is template machinery; a finished repo doesn't carry it. **KEEP
+`.claude/commands/implement.md`** — Phase 10 (the rename) still runs through it and strips
+it as its own final act, along with `docs/phase-10-rename.md` (recoverable from git
+history; the rename is an involution, so the historical guide suffices for a later
+rebrand or reversal). Finalize
+runs only in a *consumer's* copy of the template — the maintained template repo itself is
+never finalized.
 
 ### Step 5 — Delete the phase guides
 
-`rm docs/phase-*.md` — **all** per-phase guides, including this one. Their durable conventions
-already live in the `CLAUDE.md` surface.
+`rm docs/phase-[1-9]-*.md` — the per-phase guides 1–9, including this one. **Keep
+`docs/phase-10-rename.md`** — Phase 10 has not run yet; it deletes itself (and
+`/implement`) when it completes. The deleted guides' durable conventions already live in
+the `CLAUDE.md` surface.
 
 `docs/research/`: **kept by default** (the stack-choice fact-check / audit trail — low cost,
 useful provenance). Deleting it is an explicit opt-in; if you delete it, also remove
@@ -77,8 +87,10 @@ useful provenance). Deleting it is an explicit opt-in; if you delete it, also re
 
 ### Step 6 — Verify no dangling references
 
-`git grep -nE 'docs/phase-|commands/(implement|update)\b'` must return nothing (a stray mention
-inside a kept `docs/research/` report is acceptable — it's historical). Confirm the runtime surface is
+`git grep -nE 'docs/phase-[1-9]-|commands/update\b'` must return nothing (a stray mention
+inside a kept `docs/research/` report is acceptable — it's historical). References to
+`docs/phase-10-rename.md` and `commands/implement` remain BY DESIGN until Phase 10
+completes. Confirm the runtime surface is
 intact and the daily commands still resolve (`pnpm new-product`, `/add-feature`, the `ptfm-*`
 pipeline, `pnpm bootstrap`).
 
@@ -91,10 +103,12 @@ PHILOSOPHY/README rewrites land together).
 
 ## Verification
 
-- `.claude/commands/implement.md` + `.claude/commands/update.md` are gone; `ls docs/phase-*.md` returns nothing.
+- `.claude/commands/update.md` is gone; `ls docs/phase-*.md` lists ONLY
+  `phase-10-rename.md`; `.claude/commands/implement.md` remains (Phase 10's driver).
 - `README.md` has no `## Status` / `## Stage 1` / `## Post-setup cleanup` sections.
 - `PHILOSOPHY.md` has no execution-guides callout or phases table (no links to deleted files).
-- `git grep -nE 'docs/phase-|commands/(implement|update)\b'` is clean (modulo kept research history).
+- `git grep -nE 'docs/phase-[1-9]-|commands/update\b'` is clean (modulo kept research
+  history); phase-10/implement references remain by design.
 - The runtime surface is untouched: `scripts/`, the `CLAUDE.md` files, `packages/ui/FIGMA.md`,
   the `ptfm-*` + thin-wrapper commands, `PHILOSOPHY.md`.
 
@@ -103,8 +117,9 @@ PHILOSOPHY/README rewrites land together).
 - [ ] Guard passed (Phases 1–8 verified) and the user confirmed the destructive run.
 - [ ] `PHILOSOPHY.md` trimmed (callout + table removed; rest intact).
 - [ ] `README.md` rewritten to built-state form (no build-process sections).
-- [ ] `.claude/commands/implement.md` + `.claude/commands/update.md` deleted.
-- [ ] `docs/phase-*.md` deleted (research kept-or-deleted decision stated).
+- [ ] `.claude/commands/update.md` deleted; `implement.md` KEPT (Phase 10's driver).
+- [ ] `docs/phase-[1-9]-*.md` deleted; `phase-10-rename.md` KEPT (research
+      kept-or-deleted decision stated).
 - [ ] No dangling references; runtime surface intact; daily commands resolve.
 - [ ] One commit.
 
@@ -116,8 +131,9 @@ A single `chore: finalize template — strip build scaffolding`.
 
 - **Never run before Phases 1–8 are verified.** This phase deletes the only instructions for
   building the template — running it early is unrecoverable except via git.
-- **It removes the command that runs it.** Deleting `.claude/commands/implement.md` (+
-  `update.md`) and this guide is the intended final act; do the deletions last.
+- **It removes its own guide.** Deleting guides 1–9 (including this one) is intended;
+  do the deletions last. `/implement` + `docs/phase-10-rename.md` deliberately survive —
+  they are Phase 10's problem to remove.
 - **Recoverable only via git history** — there is no in-tree undo. The destructive-gate
   confirmation (Step 1) exists for exactly this reason.
 
