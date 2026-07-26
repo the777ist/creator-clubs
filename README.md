@@ -110,6 +110,19 @@ verification gate. With Claude Code, the `/implement` command drives a phase end
 theme/dark toggle, and tab navigation. **Phase 9** is the graduation step: once 1–8 are built
 and verified, it strips the template machinery.
 
+**The final step — rename.** A finalized repo still carries the generic identity (root
+package `platform`, org placeholder `example`, package scope `@platform/*`). Give it its
+real identity with the commit-verified renaming playbook:
+
+```
+/rename <your-name>     # repo identity -> org -> package scope, layer by layer, fully gated
+```
+
+`/rename` executes [`RENAME.md`](RENAME.md): three reviewable layers with exact-count
+replacements and the full verification gate after — while the fourth layer (the `template`
+product token, brand modes, workflow filters) is stamping machinery and never renames. The
+procedure is an involution: run it with old/new swapped and it renames back.
+
 ---
 
 ## Stage 2 — create a product (the everyday flow)
@@ -242,5 +255,6 @@ than update from stale knowledge.
 | [`PHILOSOPHY.md`](PHILOSOPHY.md) | Architecture, locked decisions, conventions, repo spec |
 | [`docs/phase-*.md`](docs/) | Literal step-by-step build guides (one per phase) |
 | [`docs/research/`](docs/research/) | The fact-check behind every stack choice, with sources |
+| [`RENAME.md`](RENAME.md) | The template-to-real-identity renaming playbook (`/rename`, post-finalize) |
 | [`packages/ui/FIGMA.md`](packages/ui/FIGMA.md) | Design-system / token contract (also the designer handover doc) |
 | `CLAUDE.md` (root / `packages/ui` / per-product) | The authoritative add-a-thing recipes — *built during implementation* |

@@ -20,8 +20,8 @@ built-state form, so the finished repo carries only its runtime surface — `CLA
     `packages/ui/FIGMA.md`.
   - `scripts/{new-product,bootstrap,figma-tokens}.mjs`.
   - The runtime slash commands (`new-product`, `affected`, `typegen`, `release`,
-    `add-component`, `sync-tokens`, `bootstrap-design-system`, `add-feature`, the `ptfm-*`
-    pipeline).
+    `add-component`, `sync-tokens`, `bootstrap-design-system`, `add-feature`, `rename`, the
+    `ptfm-*` pipeline) and the `RENAME.md` playbook `/rename` executes.
   - `products/_template` builds and a `demo` product was stamped (Phase 7 proof).
   - `turbo run lint typecheck test build` green; the api gates (Ruff/pyright/pytest) green.
 - **If any of the above is missing or red, STOP.** Do NOT strip scaffolding on an incomplete or
@@ -55,14 +55,19 @@ build-process sections: `## Status` (the "not built yet" framing) and `## Stage 
 template` (the `/implement 1…9` list). **Keep + renumber** `## Stage 2 — create a product` →
 `## Create a product`. **Keep:** the intro, `## Tech stack`, `## Prerequisites`, `## Repository
 layout`, `## Conventions`, `## Operational stack` + the `ptfm-*` pipeline, and `## Where to read
-more` (drop its `docs/phase-*.md` row). Result: "what it is → what it's built with →
-prerequisites → create & run a product → layout → conventions → workflow → where to read more."
+more` (drop its `docs/phase-*.md` row). **Keep (or add) the rename step**: the
+built-state README ends Stage-1 guidance with the one post-finalize step that remains —
+`/rename <name>` (RENAME.md) to swap the generic identity for the real one. Result: "what it
+is → what it's built with → prerequisites → rename to your identity → create & run a product
+→ layout → conventions → workflow → where to read more."
 
 ### Step 4 — Delete the build-time commands
 
 `rm .claude/commands/implement.md .claude/commands/update.md` — `/implement` (the build-phase
 command) and `/update` (the template **maintainer's** research-refresh command) are template
-machinery; a finished product repo carries neither. Finalize runs only in a *consumer's* copy
+machinery; a finished product repo carries neither. **`/rename` + `RENAME.md` are NOT
+machinery — keep them**: the finalized repo still carries the generic identity, and renaming
+it is the one step that happens AFTER finalize. Finalize runs only in a *consumer's* copy
 of the template, so sweeping both out is correct — the maintained template repo itself is never
 finalized.
 
@@ -96,7 +101,8 @@ PHILOSOPHY/README rewrites land together).
 - `PHILOSOPHY.md` has no execution-guides callout or phases table (no links to deleted files).
 - `git grep -nE 'docs/phase-|commands/(implement|update)\b'` is clean (modulo kept research history).
 - The runtime surface is untouched: `scripts/`, the `CLAUDE.md` files, `packages/ui/FIGMA.md`,
-  the `ptfm-*` + thin-wrapper commands, `PHILOSOPHY.md`.
+  the `ptfm-*` + thin-wrapper commands, `.claude/commands/rename.md` + `RENAME.md`,
+  `PHILOSOPHY.md`.
 
 ## Definition of done
 
