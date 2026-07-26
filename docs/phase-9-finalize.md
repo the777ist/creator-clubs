@@ -22,7 +22,8 @@ built-state form, so the finished repo carries only its runtime surface — `CLA
   - `scripts/{new-product,bootstrap,figma-tokens}.mjs`.
   - The runtime slash commands (`new-product`, `remove-product`, `affected`, `typegen`, `release`,
     `add-component`, `sync-tokens`, `bootstrap-design-system`, `add-feature`, the
-    `ptfm-*` pipeline) and the `RENAME.md` playbook (executed by Phase 10; kept forever).
+    `ptfm-*` pipeline) and the `RENAME.md` playbook (executed by Phase 10, which
+    deletes it too when it completes).
   - `products/_template` builds and a `demo` product was stamped (Phase 7 proof).
   - `turbo run lint typecheck test build` green; the api gates (Ruff/pyright/pytest) green.
 - **If any of the above is missing or red, STOP.** Do NOT strip scaffolding on an incomplete or
@@ -68,8 +69,9 @@ is → what it's built with → prerequisites → rename to your identity → cr
 `rm .claude/commands/update.md` — `/update` (the template **maintainer's** research-refresh
 command) is template machinery; a finished repo doesn't carry it. **KEEP
 `.claude/commands/implement.md`** — Phase 10 (the rename) still runs through it and strips
-it as its own final act. **`RENAME.md` is not machinery at all — keep it forever** (the
-rename is an involution; the playbook documents reversal and future rebrands). Finalize
+it as its own final act, along with `docs/phase-10-rename.md` and `RENAME.md` itself
+(recoverable from git history; the procedure is an involution, so the historical playbook
+suffices for a later rebrand or reversal). Finalize
 runs only in a *consumer's* copy of the template — the maintained template repo itself is
 never finalized.
 
@@ -109,7 +111,8 @@ PHILOSOPHY/README rewrites land together).
 - `git grep -nE 'docs/phase-[1-9]-|commands/update\b'` is clean (modulo kept research
   history); phase-10/implement references remain by design.
 - The runtime surface is untouched: `scripts/`, the `CLAUDE.md` files, `packages/ui/FIGMA.md`,
-  the `ptfm-*` + thin-wrapper commands, `RENAME.md`, `PHILOSOPHY.md`.
+  the `ptfm-*` + thin-wrapper commands, `PHILOSOPHY.md` (+ `RENAME.md`, present until
+  Phase 10 consumes it).
 
 ## Definition of done
 

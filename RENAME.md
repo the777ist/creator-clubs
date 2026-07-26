@@ -9,8 +9,9 @@ procedure: extracted from the actual rename of the reference build
 it in REVERSE (reproducing the pre-rename tree **byte-exactly**), and re-proven by a
 fresh-clone end-to-end test run (`sevenfold`) that passed every local gate plus remote
 CI and the dispatched nightly E2E/VR on the renamed state. Run it via `/implement 10
-<new-identity>` (guide: `docs/phase-10-rename.md`) — or follow it by hand for a later
-rebrand or reversal.
+<new-identity>` (guide: `docs/phase-10-rename.md`); the phase deletes this file when it
+completes — recover it from git history for a later rebrand or reversal (the procedure
+is an involution).
 
 Throughout, `<repo>` = your new identity (worked example: `the777incident`). One identity
 serves as repo name, org, and scope here; if yours differ, substitute per layer.

@@ -4,14 +4,14 @@
 > reference build and re-proven end-to-end on a fresh clone (every local gate + remote CI +
 > nightly E2E/VR on the renamed state). **Read it in full, every run, before touching
 > anything.** This guide wraps it in the phase workflow; RENAME.md is the contract for
-> *what* changes and *what must never change*. Unlike every other guide, RENAME.md
-> **survives** this phase — renames are an involution (run with old/new swapped to rename
-> back), so the playbook stays as runtime surface for future rebrands.
+> *what* changes and *what must never change*. When this phase completes, ALL rename
+> scaffolding goes — including RENAME.md itself (git history keeps it; the procedure is an
+> involution, so the historical playbook covers a later rebrand or reversal).
 
 **Goal:** Swap the generic template identity — repo name `platform`, org placeholder
 `example`, package scope `@platform/*` — for the USER-SUPPLIED real identity, layer by
-layer with full gates; then strip the last build scaffolding (`/implement` + this guide),
-leaving the repo fully yours.
+layer with full gates; then strip the last build scaffolding (`/implement`, this guide,
+and `RENAME.md`), leaving the repo fully yours with zero template artifacts.
 
 ---
 
@@ -74,10 +74,11 @@ with `pnpm remove-product <name> --yes`.
 
 ### Step 7 — Strip the last scaffolding
 
-`rm .claude/commands/implement.md docs/phase-10-rename.md` — this phase removes the
-command that runs it and its own guide (the same pattern as Phase 9). Rewrite the
-README's rename-step mention to its post-rename form (the step is done; keep the
-`RENAME.md` pointer — it documents reversal). **Keep `RENAME.md`.** Commit.
+`rm .claude/commands/implement.md docs/phase-10-rename.md RENAME.md` — this phase removes
+the command that runs it, its own guide, and the playbook it executed (the same
+self-removing pattern as Phase 9; everything is recoverable from git history). Remove the
+README's rename-step mention and its `RENAME.md` Where-to-read-more row — the step is
+done and the pointers would dangle. Commit.
 
 ---
 
@@ -87,15 +88,16 @@ README's rename-step mention to its post-rename form (the step is done; keep the
 - Residual audits return keep-list hits only.
 - The stamp round-trip came out clean under the new identity (zero old-token residuals in
   the stamped tree; `remove-product` restored a clean tree).
-- `ls docs/phase-*.md` returns nothing; `.claude/commands/implement.md` gone;
-  `RENAME.md` present.
+- `ls docs/phase-*.md` returns nothing; `.claude/commands/implement.md` and
+  `RENAME.md` gone; `git grep -n 'RENAME.md'` clean.
 
 ## Definition of done
 
 - [ ] User supplied the identity and confirmed the destructive run.
 - [ ] Three layer commits (identity → org → scope), each format-clean and verified landed.
 - [ ] All gates green; residual audits keep-list-only; stamp round-trip proven.
-- [ ] Last scaffolding stripped (`/implement` + this guide); `RENAME.md` kept.
+- [ ] Last scaffolding stripped (`/implement`, this guide, `RENAME.md`, the README
+      mentions).
 - [ ] Report: layers applied, per-gate results with evidence, anything stopped on —
       honestly (no claiming done over a failed gate).
 
